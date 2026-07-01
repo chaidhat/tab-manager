@@ -1,21 +1,114 @@
 {
   "name": "tab-manager",
   "displayName": "Tab Manager",
-  "description": "Opens a new tab that says hello world",
+  "description": "Save and switch between editor layouts — pane arrangements and their open files — from the sidebar.",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": ["Other"],
-  "activationEvents": [],
+  "activationEvents": ["onView:tab-manager.layouts"],
   "main": "./dist/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tab-manager",
+          "title": "Tab Manager",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "tab-manager": [
+        {
+          "type": "tree",
+          "id": "tab-manager.layouts",
+          "name": "Layouts"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "tab-manager.layouts",
+        "contents": "Save your current editor arrangement — the panes and the files in them — as a layout, then switch between layouts anytime.\n[Save Current Layout](command:tabManager.saveLayout)"
+      }
+    ],
     "commands": [
       {
-        "command": "tab-manager.helloWorld",
-        "title": "Tab Manager: Open Hello World Tab"
+        "command": "tabManager.saveLayout",
+        "title": "Save Current Layout",
+        "category": "Tab Manager",
+        "icon": "$(add)"
+      },
+      {
+        "command": "tabManager.applyLayout",
+        "title": "Apply Layout",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.updateLayout",
+        "title": "Update Layout from Current Arrangement",
+        "category": "Tab Manager",
+        "icon": "$(save)"
+      },
+      {
+        "command": "tabManager.renameLayout",
+        "title": "Rename Layout",
+        "category": "Tab Manager",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "tabManager.deleteLayout",
+        "title": "Delete Layout",
+        "category": "Tab Manager",
+        "icon": "$(trash)"
       }
-    ]
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "tabManager.saveLayout",
+          "when": "view == tab-manager.layouts",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "tabManager.updateLayout",
+          "when": "view == tab-manager.layouts && viewItem == layout",
+          "group": "inline@1"
+        },
+        {
+          "command": "tabManager.renameLayout",
+          "when": "view == tab-manager.layouts && viewItem == layout",
+          "group": "inline@2"
+        },
+        {
+          "command": "tabManager.deleteLayout",
+          "when": "view == tab-manager.layouts && viewItem == layout",
+          "group": "inline@3"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "tabManager.applyLayout",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.updateLayout",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.renameLayout",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.deleteLayout",
+          "when": "false"
+        }
+      ]
+    }
   },
   "scripts": {
     "compile": "tsc -p ./",
