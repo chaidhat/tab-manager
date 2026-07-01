@@ -20,7 +20,8 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "vscode:prepublish": "npm run compile"
+    "vscode:prepublish": "npm run compile",
+    "start": "npm run compile && code --extensionDevelopmentPath=\"$PWD\" --new-window ."
   },
   "devDependencies": {
     "@types/vscode": "^1.85.0",

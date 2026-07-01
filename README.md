@@ -1,9 +1,9 @@
 # Tab Manager
 
-A minimal VS Code extension that opens a new tab showing "Hello World".
+VS Code extension that opens a "Hello World" tab.
 
-## Usage
+## Run
 
 1. `npm install`
-2. Press `F5` in VS Code to launch the Extension Development Host
-3. Run the command `Tab Manager: Open Hello World Tab` from the Command Palette
+2. `npm start` — compiles and launches the Extension Development Host
+3. Run **Tab Manager: Open Hello World Tab** from the Command Palette
