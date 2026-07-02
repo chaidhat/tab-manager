@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { COMMANDS } from './commands';
-import { prThemeIcon, resolveWorktreePr, WorktreePr } from './pr';
+import { PrInfo, prThemeIcon, resolveWorktreePr } from './pr';
 import { LayoutStore } from './store';
 import { WorktreeElement } from './types';
 import { currentBranch, groupFoldersByRepo } from './worktrees';
@@ -33,7 +33,7 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
   // folderUri -> resolved PR (null = looked up, no PR). Populated in the
   // background so a row can show its PR title without blocking the tree; the
   // presence of a key also stops us re-querying `gh` on every re-render.
-  private readonly prCache = new Map<string, WorktreePr | null>();
+  private readonly prCache = new Map<string, PrInfo | null>();
   private readonly resolving = new Set<string>();
   // Same background-resolution scheme as prCache, but for the repo-root row's
   // current branch — it shows a branch name instead of a PR, and is never
@@ -71,19 +71,17 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
     }
 
     const openUris = new Set(folders.map((folder) => folder.uri.toString()));
-    const sections = (await groupFoldersByRepo(folders)).map(
-      (repo): RepoSection => ({
-        id: `repo:${repo.repoRoot ?? 'non-git'}`,
-        label: repo.name,
-        repoRoot: repo.repoRoot,
-        worktrees: repo.folders.map((folder) => ({
-          folderUri: folder.uri.toString(),
-          name: folder.name,
-          isOpen: openUris.has(folder.uri.toString()),
-          isRoot: repo.repoRoot !== undefined && folder.uri.fsPath === repo.repoRoot,
-        })),
-      })
-    );
+    const sections = (await groupFoldersByRepo(folders)).map((repo): RepoSection => ({
+      id: `repo:${repo.repoRoot ?? 'non-git'}`,
+      label: repo.name,
+      repoRoot: repo.repoRoot,
+      worktrees: repo.folders.map((folder) => ({
+        folderUri: folder.uri.toString(),
+        name: folder.name,
+        isOpen: openUris.has(folder.uri.toString()),
+        isRoot: repo.repoRoot !== undefined && folder.uri.fsPath === repo.repoRoot,
+      })),
+    }));
     const worktrees = sections.flatMap((section) => section.worktrees);
     this.syncPrTitles(worktrees.filter((worktree) => !worktree.isRoot));
     this.syncBranches(worktrees.filter((worktree) => worktree.isRoot));
@@ -99,7 +97,7 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
   private syncPrTitles(worktrees: WorktreeElement[]): void {
     const targets = worktrees.filter(
       (worktree) =>
-        !this.prCache.has(worktree.folderUri) && !this.resolving.has(worktree.folderUri)
+        !this.prCache.has(worktree.folderUri) && !this.resolving.has(worktree.folderUri),
     );
     if (targets.length === 0) {
       return;
@@ -114,7 +112,7 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
         this.resolving.delete(worktree.folderUri);
         this.prCache.set(worktree.folderUri, pr ?? null);
         return pr !== undefined;
-      })
+      }),
     ).then((found) => {
       if (found.some(Boolean)) {
         this.emitter.fire();
@@ -126,7 +124,7 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
   private syncBranches(roots: WorktreeElement[]): void {
     const targets = roots.filter(
       (worktree) =>
-        !this.branchCache.has(worktree.folderUri) && !this.resolvingBranch.has(worktree.folderUri)
+        !this.branchCache.has(worktree.folderUri) && !this.resolvingBranch.has(worktree.folderUri),
     );
     if (targets.length === 0) {
       return;
@@ -140,7 +138,7 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
         this.resolvingBranch.delete(worktree.folderUri);
         this.branchCache.set(worktree.folderUri, branch ?? null);
         return branch !== undefined;
-      })
+      }),
     ).then((found) => {
       if (found.some(Boolean)) {
         this.emitter.fire();
@@ -223,7 +221,9 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
   }
 
   dispose(): void {
-    this.subscriptions.forEach((subscription) => subscription.dispose());
+    for (const subscription of this.subscriptions) {
+      subscription.dispose();
+    }
     this.emitter.dispose();
   }
 }

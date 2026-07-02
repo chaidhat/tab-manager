@@ -22,14 +22,12 @@ export async function listDirectory(dirUri: vscode.Uri): Promise<FileEntry[]> {
 
   return entries
     .filter(([name]) => name !== '.git')
-    .map(
-      ([name, type]): FileEntry => ({
-        uri: vscode.Uri.joinPath(dirUri, name),
-        name,
-        isDirectory: (type & vscode.FileType.Directory) !== 0,
-      })
-    )
+    .map(([name, type]): FileEntry => ({
+      uri: vscode.Uri.joinPath(dirUri, name),
+      name,
+      isDirectory: (type & vscode.FileType.Directory) !== 0,
+    }))
     .sort((a, b) =>
-      a.isDirectory === b.isDirectory ? a.name.localeCompare(b.name) : a.isDirectory ? -1 : 1
+      a.isDirectory === b.isDirectory ? a.name.localeCompare(b.name) : a.isDirectory ? -1 : 1,
     );
 }

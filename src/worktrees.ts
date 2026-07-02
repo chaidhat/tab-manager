@@ -1,10 +1,6 @@
-import { execFile } from 'child_process';
 import * as path from 'path';
-import { promisify } from 'util';
 import * as vscode from 'vscode';
-import { gh, ghErrorMessage } from './ghCli';
-
-const run = promisify(execFile);
+import { errorMessage, gh, git } from './cli';
 
 /** A folder to show in the sidebar — an open workspace folder or a discovered one. */
 export interface FolderRef {
@@ -31,7 +27,7 @@ const CLAUDE_WORKTREES_DIR = '.claude/worktrees';
  * are collected into a single trailing "Folders" group.
  */
 export async function groupFoldersByRepo(
-  folders: readonly vscode.WorkspaceFolder[]
+  folders: readonly vscode.WorkspaceFolder[],
 ): Promise<RepoGroup[]> {
   const repos = new Map<string, { name: string; folders: FolderRef[] }>();
   const nonGit: FolderRef[] = [];
@@ -67,7 +63,7 @@ export async function groupFoldersByRepo(
 function addFolder(
   repos: Map<string, { name: string; folders: FolderRef[] }>,
   repoRoot: string,
-  ref: FolderRef
+  ref: FolderRef,
 ): void {
   const existing = repos.get(repoRoot);
   if (existing) {
@@ -86,10 +82,9 @@ function addFolder(
 export async function addWorktree(repoRoot: string, name: string): Promise<string> {
   const worktreePath = path.join(repoRoot, CLAUDE_WORKTREES_DIR, name);
   try {
-    await run('git', ['worktree', 'add', '-b', name, worktreePath], { cwd: repoRoot });
+    await git(['worktree', 'add', '-b', name, worktreePath], repoRoot);
   } catch (error) {
-    const stderr = (error as { stderr?: string }).stderr;
-    throw new Error(stderr?.trim() || String(error));
+    throw new Error(errorMessage(error), { cause: error });
   }
   return worktreePath;
 }
@@ -103,17 +98,15 @@ export async function addWorktree(repoRoot: string, name: string): Promise<strin
 export async function addWorktreeForPr(repoRoot: string, prNumber: number): Promise<string> {
   const worktreePath = path.join(repoRoot, CLAUDE_WORKTREES_DIR, String(prNumber));
   try {
-    await run('git', ['worktree', 'add', '--detach', worktreePath], { cwd: repoRoot });
+    await git(['worktree', 'add', '--detach', worktreePath], repoRoot);
   } catch (error) {
-    throw new Error(ghErrorMessage(error));
+    throw new Error(errorMessage(error), { cause: error });
   }
   try {
     await gh(['pr', 'checkout', String(prNumber)], worktreePath);
   } catch (error) {
-    await run('git', ['worktree', 'remove', '--force', worktreePath], { cwd: repoRoot }).catch(
-      () => undefined
-    );
-    throw new Error(ghErrorMessage(error));
+    await git(['worktree', 'remove', '--force', worktreePath], repoRoot).catch(() => undefined);
+    throw new Error(errorMessage(error), { cause: error });
   }
   return worktreePath;
 }
@@ -129,21 +122,18 @@ export async function removeWorktree(folderPath: string, force: boolean): Promis
   if (!repoRoot || repoRoot === folderPath) {
     throw new Error('Not a linked git worktree — refusing to delete a main checkout.');
   }
-  const args = ['worktree', 'remove', ...(force ? ['--force'] : []), folderPath];
   try {
-    await run('git', args, { cwd: repoRoot });
+    await git(['worktree', 'remove', ...(force ? ['--force'] : []), folderPath], repoRoot);
   } catch (error) {
-    const stderr = (error as { stderr?: string }).stderr;
-    throw new Error(stderr?.trim() || String(error));
+    throw new Error(errorMessage(error), { cause: error });
   }
 }
 
 /** The branch checked out at `cwd`, or undefined if that fails (e.g. detached HEAD). */
 export async function currentBranch(cwd: string): Promise<string | undefined> {
   try {
-    const { stdout } = await run('git', ['branch', '--show-current'], { cwd });
-    const branch = stdout.trim();
-    return branch || undefined;
+    const stdout = await git(['branch', '--show-current'], cwd);
+    return stdout.trim() || undefined;
   } catch {
     return undefined;
   }

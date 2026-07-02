@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { errorMessage } from './cli';
 import { log } from './log';
 import { listOpenPrs } from './pr';
 import { LayoutStore } from './store';
@@ -17,9 +18,9 @@ export const COMMANDS = {
 export function registerCommands(
   context: vscode.ExtensionContext,
   store: LayoutStore,
-  refreshWorktrees: () => void
+  refreshWorktrees: () => void,
 ): void {
-  const register = (id: string, handler: (...args: any[]) => unknown) =>
+  const register = (id: string, handler: (...args: never[]) => unknown) =>
     context.subscriptions.push(vscode.commands.registerCommand(id, handler));
 
   register(COMMANDS.openWindow, (folderUri: string) => {
@@ -29,13 +30,13 @@ export function registerCommands(
     });
   });
   register(COMMANDS.copyPath, (worktree: WorktreeElement) =>
-    vscode.env.clipboard.writeText(vscode.Uri.parse(worktree.folderUri).fsPath)
+    vscode.env.clipboard.writeText(vscode.Uri.parse(worktree.folderUri).fsPath),
   );
   register(COMMANDS.newWorktree, (section: RepoSection) =>
-    newWorktree(store, section, refreshWorktrees)
+    newWorktree(store, section, refreshWorktrees),
   );
   register(COMMANDS.deleteWorktree, (worktree: WorktreeElement) =>
-    deleteWorktree(store, worktree, refreshWorktrees)
+    deleteWorktree(store, worktree, refreshWorktrees),
   );
 }
 
@@ -43,7 +44,7 @@ export function registerCommands(
 async function newWorktree(
   store: LayoutStore,
   section: RepoSection,
-  refreshWorktrees: () => void
+  refreshWorktrees: () => void,
 ): Promise<void> {
   const repoRoot = section.repoRoot;
   if (!repoRoot) {
@@ -67,7 +68,7 @@ async function newWorktree(
  */
 async function createNewWorktree(
   section: RepoSection & { repoRoot: string },
-  refreshWorktrees: () => void
+  refreshWorktrees: () => void,
 ): Promise<void> {
   const name = await vscode.window.showInputBox({
     prompt: `New worktree for ${section.label} (also the branch name)`,
@@ -84,7 +85,7 @@ async function createNewWorktree(
     refreshWorktrees();
     vscode.window.showInformationMessage(`Created worktree "${name.trim()}" in ${section.label}.`);
   } catch (error) {
-    vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+    vscode.window.showErrorMessage(errorMessage(error));
   }
 }
 
@@ -96,19 +97,19 @@ async function createNewWorktree(
 async function createWorktreeFromPr(
   store: LayoutStore,
   section: RepoSection & { repoRoot: string },
-  refreshWorktrees: () => void
+  refreshWorktrees: () => void,
 ): Promise<void> {
   const prs = await listOpenPrs(section.repoRoot);
   if (prs.length === 0) {
     vscode.window.showInformationMessage(
-      `No open pull requests found for ${section.label} (is the GitHub CLI signed in?).`
+      `No open pull requests found for ${section.label} (is the GitHub CLI signed in?).`,
     );
     return;
   }
 
   const pick = await vscode.window.showQuickPick(
     prs.map((pr) => ({ label: `#${pr.number} ${pr.title}`, description: pr.headRefName, pr })),
-    { placeHolder: 'Search a pull request…', matchOnDescription: true }
+    { placeHolder: 'Search a pull request…', matchOnDescription: true },
   );
   if (!pick) {
     return;
@@ -120,7 +121,7 @@ async function createWorktreeFromPr(
         location: vscode.ProgressLocation.Notification,
         title: `Creating worktree for #${pick.pr.number}…`,
       },
-      () => addWorktreeForPr(section.repoRoot, pick.pr.number)
+      () => addWorktreeForPr(section.repoRoot, pick.pr.number),
     );
     await store.setLinkedPr(vscode.Uri.file(worktreePath).toString(), {
       number: pick.pr.number,
@@ -128,10 +129,10 @@ async function createWorktreeFromPr(
     });
     refreshWorktrees();
     vscode.window.showInformationMessage(
-      `Created worktree "${pick.pr.number}" with PR #${pick.pr.number} checked out.`
+      `Created worktree "${pick.pr.number}" with PR #${pick.pr.number} checked out.`,
     );
   } catch (error) {
-    vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+    vscode.window.showErrorMessage(errorMessage(error));
   }
 }
 
@@ -144,18 +145,18 @@ async function createWorktreeFromPr(
 async function deleteWorktree(
   store: LayoutStore,
   worktree: WorktreeElement,
-  refreshWorktrees: () => void
+  refreshWorktrees: () => void,
 ): Promise<void> {
   if (worktree.isOpen) {
     vscode.window.showWarningMessage(
-      'This worktree is open in the workspace — remove it from the workspace first.'
+      'This worktree is open in the workspace — remove it from the workspace first.',
     );
     return;
   }
   const choice = await vscode.window.showWarningMessage(
     `Delete the worktree "${worktree.name}" and its files?`,
     { modal: true, detail: 'Runs `git worktree remove`. This deletes the directory.' },
-    'Delete'
+    'Delete',
   );
   if (choice !== 'Delete') {
     return;
@@ -165,11 +166,10 @@ async function deleteWorktree(
   try {
     await removeWorktree(folderPath, false);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
     const force = await vscode.window.showWarningMessage(
       `Git refused to delete "${worktree.name}".`,
-      { modal: true, detail: `${message}\n\nForce delete and discard its changes?` },
-      'Force Delete'
+      { modal: true, detail: `${errorMessage(error)}\n\nForce delete and discard its changes?` },
+      'Force Delete',
     );
     if (force !== 'Force Delete') {
       return;
@@ -177,9 +177,7 @@ async function deleteWorktree(
     try {
       await removeWorktree(folderPath, true);
     } catch (forceError) {
-      vscode.window.showErrorMessage(
-        forceError instanceof Error ? forceError.message : String(forceError)
-      );
+      vscode.window.showErrorMessage(errorMessage(forceError));
       return;
     }
   }

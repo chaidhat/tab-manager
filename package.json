@@ -4,6 +4,7 @@
   "description": "Worktree-centric window management: one window per worktree, with PR linking, creation from PRs, and changed-file diffs.",
   "version": "0.2.0",
   "publisher": "chaidhat",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/chaidhat/tab-manager.git"
@@ -129,12 +130,6 @@
         "category": "Tab Manager"
       },
       {
-        "command": "tabManager.pickCompareBranch",
-        "title": "Pick Compare Branch",
-        "category": "Tab Manager",
-        "icon": "$(git-branch)"
-      },
-      {
         "command": "tabManager.openDiff",
         "title": "Open Changes",
         "category": "Tab Manager"
@@ -189,11 +184,6 @@
         {
           "command": "tabManager.refreshPr",
           "when": "view == tab-manager.worktreePr",
-          "group": "navigation"
-        },
-        {
-          "command": "tabManager.pickCompareBranch",
-          "when": "view == tab-manager.worktreeFiles",
           "group": "navigation"
         }
       ],
@@ -329,10 +319,6 @@
           "when": "false"
         },
         {
-          "command": "tabManager.pickCompareBranch",
-          "when": "false"
-        },
-        {
           "command": "tabManager.openDiff",
           "when": "false"
         },
@@ -384,14 +370,23 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
+    "lint": "eslint src",
+    "format": "prettier --write src",
+    "format:check": "prettier --check src",
+    "check": "npm run compile && npm run lint && npm run format:check",
     "vscode:prepublish": "npm run compile",
     "start": "npm run compile && code --extensionDevelopmentPath=\"$PWD\" --new-window .",
     "package": "vsce package"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.125.0",
     "@vscode/vsce": "^3.9.2",
-    "typescript": "^5.4.0"
+    "eslint": "10.6.0",
+    "eslint-config-prettier": "10.1.8",
+    "prettier": "3.9.4",
+    "typescript": "^5.4.0",
+    "typescript-eslint": "8.62.1"
   }
 }

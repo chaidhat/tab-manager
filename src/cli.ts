@@ -27,8 +27,17 @@ export async function gh(args: string[], cwd: string): Promise<string> {
   throw lastError;
 }
 
-/** A human-readable message from a failed gh/git invocation. */
-export function ghErrorMessage(error: unknown): string {
+/** Runs git in `cwd` and returns stdout; throws on failure. */
+export async function git(args: string[], cwd: string): Promise<string> {
+  const { stdout } = await run('git', args, { cwd });
+  return stdout;
+}
+
+/**
+ * A human-readable message from a failed invocation — a CLI's stderr when it
+ * has one (git and gh put their explanations there), else the error itself.
+ */
+export function errorMessage(error: unknown): string {
   const stderr = (error as { stderr?: string }).stderr;
   return stderr?.trim() || (error instanceof Error ? error.message : String(error));
 }

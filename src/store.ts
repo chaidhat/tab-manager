@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 
 const ACTIVE_KEY = 'tabManager.activeWorktree';
-const FILTER_BRANCH_KEY = 'tabManager.filesFilterBranch';
 const LINKED_PRS_KEY = 'tabManager.linkedPrs';
 
 /** A pull request a worktree is linked to. */
@@ -12,8 +11,8 @@ export interface LinkedPr {
 
 /**
  * Per-workspace state: which worktree this window targets (set in child
- * worktree windows), PR links, and the diff-view compare branch. Emits
- * {@link onDidChange} whenever the data changes so views can refresh.
+ * worktree windows) and PR links. Emits {@link onDidChange} whenever the
+ * data changes so views can refresh.
  */
 export class LayoutStore implements vscode.Disposable {
   private readonly emitter = new vscode.EventEmitter<void>();
@@ -31,21 +30,18 @@ export class LayoutStore implements vscode.Disposable {
     this.emitter.fire();
   }
 
-  /** The branch the changed-files view diffs against (e.g. "staging"). */
-  get compareBranch(): string | undefined {
-    return this.memento.get<string>(FILTER_BRANCH_KEY);
-  }
-
-  async setCompareBranch(branch: string): Promise<void> {
-    await this.memento.update(FILTER_BRANCH_KEY, branch);
-    this.emitter.fire();
-  }
-
   /** PR manually linked to a worktree ("Link with PR…"), if any. */
   linkedPr(folderUri: string): LinkedPr | undefined {
     const raw = this.linkedPrs()[folderUri];
-    // Earlier versions stored just the number.
-    return typeof raw === 'number' ? { number: raw } : raw;
+    return raw === undefined ? undefined : normalizeLinkedPr(raw);
+  }
+
+  /** The folderUri of the worktree already linked to this PR number, if any. */
+  folderLinkedToPr(prNumber: number, excludingFolderUri?: string): string | undefined {
+    return Object.entries(this.linkedPrs()).find(
+      ([folderUri, raw]) =>
+        folderUri !== excludingFolderUri && normalizeLinkedPr(raw).number === prNumber,
+    )?.[0];
   }
 
   async setLinkedPr(folderUri: string, pr: LinkedPr | undefined): Promise<void> {
@@ -75,4 +71,9 @@ export class LayoutStore implements vscode.Disposable {
   dispose(): void {
     this.emitter.dispose();
   }
+}
+
+/** Earlier versions stored just the PR number. */
+function normalizeLinkedPr(raw: number | LinkedPr): LinkedPr {
+  return typeof raw === 'number' ? { number: raw } : raw;
 }

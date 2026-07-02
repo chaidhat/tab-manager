@@ -1,13 +1,9 @@
-import { execFile } from 'child_process';
 import * as path from 'path';
-import { promisify } from 'util';
 import * as vscode from 'vscode';
-import { gh, ghErrorMessage } from './ghCli';
+import { errorMessage, gh, git } from './cli';
 import { log } from './log';
 import { LayoutStore } from './store';
 import { WorktreeElement } from './types';
-
-const run = promisify(execFile);
 
 const PR_COMMANDS = {
   refresh: 'tabManager.refreshPr',
@@ -16,15 +12,32 @@ const PR_COMMANDS = {
   editDescription: 'tabManager.editPrDescription',
 } as const;
 
-interface PrInfo {
+/** A worktree's pull request, as reported by `gh pr view`. */
+export interface PrInfo {
   number: number;
   title: string;
   state: string;
   url: string;
   isDraft: boolean;
+  /** The branch the PR merges into — what changed files are diffed against. */
+  baseRefName: string;
 }
 
 type PrLookup = { kind: 'pr'; pr: PrInfo } | { kind: 'none' } | { kind: 'no-gh' };
+
+/**
+ * Fetches the PR for a folder: the linked PR by number if one is given,
+ * otherwise the PR for the folder's current branch. Throws when there is no
+ * PR or `gh` fails.
+ */
+async function fetchPr(cwd: string, linkedNumber: number | undefined): Promise<PrInfo> {
+  const selector = linkedNumber !== undefined ? [String(linkedNumber)] : [];
+  const stdout = await gh(
+    ['pr', 'view', ...selector, '--json', 'number,title,state,url,isDraft,baseRefName'],
+    cwd,
+  );
+  return JSON.parse(stdout) as PrInfo;
+}
 
 /** The four states a PR renders as, folding `isDraft` into `state`. */
 export type PrVisualState = 'open' | 'draft' | 'merged' | 'closed';
@@ -77,19 +90,19 @@ export function registerPrView(context: vscode.ExtensionContext, store: LayoutSt
     vscode.window.registerWebviewViewProvider('tab-manager.worktreePr', provider),
     vscode.commands.registerCommand(PR_COMMANDS.refresh, () => provider.refresh()),
     vscode.commands.registerCommand(PR_COMMANDS.link, (worktree: WorktreeElement) =>
-      linkPr(store, worktree)
+      linkPr(store, worktree),
     ),
     vscode.commands.registerCommand(
       PR_COMMANDS.editTitle,
       (folderUri: string, cwd: string, prNumber: number, currentTitle: string) =>
-        editTitle(store, folderUri, cwd, prNumber, currentTitle, provider)
+        editTitle(store, folderUri, cwd, prNumber, currentTitle, provider),
     ),
     vscode.commands.registerCommand(PR_COMMANDS.editDescription, (cwd: string, prNumber: number) =>
-      editDescription(context, cwd, prNumber, pendingEdits)
+      editDescription(context, cwd, prNumber, pendingEdits),
     ),
     vscode.workspace.onDidSaveTextDocument((document) =>
-      publishSavedDescription(document, pendingEdits)
-    )
+      publishSavedDescription(document, pendingEdits),
+    ),
   );
 }
 
@@ -180,7 +193,7 @@ class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable
             state.folderUri,
             state.cwd,
             pr.number,
-            pr.title
+            pr.title,
           );
         }
         break;
@@ -238,9 +251,7 @@ function renderHtml(state: PrViewState | undefined): string {
   } else if (state.lookup.kind === 'no-gh') {
     content = `<p class="muted">GitHub CLI (gh) not found — <code>brew install gh</code>.</p>`;
   } else if (state.lookup.kind === 'none') {
-    const create = state.createUrl
-      ? `<button data-cmd="create">Create PR on GitHub…</button>`
-      : '';
+    const create = state.createUrl ? `<button data-cmd="create">Create PR on GitHub…</button>` : '';
     content = `
       <p class="muted">No pull request for this worktree yet.</p>
       <div class="actions">
@@ -302,34 +313,19 @@ function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;');
 }
 
-/** A worktree's resolved PR, just enough to label and color its row. */
-export interface WorktreePr {
-  number: number;
-  title: string;
-  state: string;
-  isDraft: boolean;
-}
-
 /**
- * The pull request for a worktree, for the Worktrees list: its linked PR by
- * number if one is set, otherwise the PR for the folder's current branch.
- * Returns undefined when there's no PR (or `gh` fails); failures are logged,
- * not surfaced, since this runs speculatively for every worktree row.
+ * The pull request for a worktree, for the Worktrees list. Returns undefined
+ * when there's no PR (or `gh` fails); failures are logged, not surfaced,
+ * since this runs speculatively for every worktree row.
  */
 export async function resolveWorktreePr(
   cwd: string,
-  linkedNumber: number | undefined
-): Promise<WorktreePr | undefined> {
+  linkedNumber: number | undefined,
+): Promise<PrInfo | undefined> {
   try {
-    const selector = linkedNumber !== undefined ? [String(linkedNumber)] : [];
-    const stdout = await gh(
-      ['pr', 'view', ...selector, '--json', 'number,title,state,isDraft'],
-      cwd
-    );
-    const pr = JSON.parse(stdout) as WorktreePr;
-    return { number: pr.number, title: pr.title, state: pr.state, isDraft: pr.isDraft };
+    return await fetchPr(cwd, linkedNumber);
   } catch (error) {
-    log(`tree: pr lookup failed for ${cwd}: ${ghErrorMessage(error)}`);
+    log(`tree: pr lookup failed for ${cwd}: ${errorMessage(error)}`);
     return undefined;
   }
 }
@@ -345,11 +341,11 @@ export async function listOpenPrs(cwd: string): Promise<OpenPr[]> {
   try {
     const stdout = await gh(
       ['pr', 'list', '--json', 'number,title,headRefName', '--limit', '100'],
-      cwd
+      cwd,
     );
     return JSON.parse(stdout) as OpenPr[];
   } catch (error) {
-    log(`pr: listing PRs failed: ${ghErrorMessage(error)}`);
+    log(`pr: listing PRs failed: ${errorMessage(error)}`);
     return [];
   }
 }
@@ -357,7 +353,7 @@ export async function listOpenPrs(cwd: string): Promise<OpenPr[]> {
 /** Right-click "Link with PR…": pick from open PRs, type a number, or unlink. */
 async function linkPr(store: LayoutStore, worktree: WorktreeElement): Promise<void> {
   if (worktree.isRoot) {
-    vscode.window.showWarningMessage('The repo\'s main checkout can\'t be linked to a PR.');
+    vscode.window.showWarningMessage("The repo's main checkout can't be linked to a PR.");
     return;
   }
   const cwd = vscode.Uri.parse(worktree.folderUri).fsPath;
@@ -402,6 +398,14 @@ async function linkPr(store: LayoutStore, worktree: WorktreeElement): Promise<vo
   if (prNumber === undefined || Number.isNaN(prNumber)) {
     return;
   }
+  const conflictingFolderUri = store.folderLinkedToPr(prNumber, worktree.folderUri);
+  if (conflictingFolderUri !== undefined) {
+    const conflictingName = path.basename(vscode.Uri.parse(conflictingFolderUri).fsPath);
+    vscode.window.showWarningMessage(
+      `PR #${prNumber} is already linked to "${conflictingName}". Unlink it there first.`,
+    );
+    return;
+  }
   await store.setLinkedPr(worktree.folderUri, { number: prNumber, title: prTitle });
   vscode.window.showInformationMessage(`Linked "${worktree.name}" with PR #${prNumber}.`);
 }
@@ -412,7 +416,7 @@ async function editTitle(
   cwd: string,
   prNumber: number,
   currentTitle: string,
-  provider: PrWebviewProvider
+  provider: PrWebviewProvider,
 ): Promise<void> {
   const title = await vscode.window.showInputBox({
     prompt: `New title for PR #${prNumber}`,
@@ -430,7 +434,7 @@ async function editTitle(
     vscode.window.showInformationMessage(`Renamed PR #${prNumber}.`);
     provider.refresh();
   } catch (error) {
-    vscode.window.showErrorMessage(ghErrorMessage(error));
+    vscode.window.showErrorMessage(errorMessage(error));
   }
 }
 
@@ -442,7 +446,7 @@ async function editDescription(
   context: vscode.ExtensionContext,
   cwd: string,
   prNumber: number,
-  pendingEdits: PendingEdits
+  pendingEdits: PendingEdits,
 ): Promise<void> {
   try {
     const stdout = await gh(['pr', 'view', String(prNumber), '--json', 'body'], cwd);
@@ -458,53 +462,45 @@ async function editDescription(
       preview: false,
     });
     vscode.window.showInformationMessage(
-      `Editing PR #${prNumber} description — save the file to publish it.`
+      `Editing PR #${prNumber} description — save the file to publish it.`,
     );
   } catch (error) {
-    vscode.window.showErrorMessage(ghErrorMessage(error));
+    vscode.window.showErrorMessage(errorMessage(error));
   }
 }
 
 async function publishSavedDescription(
   document: vscode.TextDocument,
-  pendingEdits: PendingEdits
+  pendingEdits: PendingEdits,
 ): Promise<void> {
   const edit = pendingEdits.get(document.uri.fsPath);
   if (!edit) {
     return;
   }
   try {
-    await gh(
-      ['pr', 'edit', String(edit.number), '--body-file', document.uri.fsPath],
-      edit.cwd
-    );
+    await gh(['pr', 'edit', String(edit.number), '--body-file', document.uri.fsPath], edit.cwd);
     vscode.window.showInformationMessage(`Updated PR #${edit.number} description.`);
   } catch (error) {
-    vscode.window.showErrorMessage(ghErrorMessage(error));
+    vscode.window.showErrorMessage(errorMessage(error));
   }
 }
 
 async function lookUpPr(cwd: string, linkedNumber: number | undefined): Promise<PrLookup> {
   try {
-    const selector = linkedNumber !== undefined ? [String(linkedNumber)] : [];
-    const stdout = await gh(
-      ['pr', 'view', ...selector, '--json', 'number,title,state,url,isDraft'],
-      cwd
-    );
-    return { kind: 'pr', pr: JSON.parse(stdout) as PrInfo };
+    return { kind: 'pr', pr: await fetchPr(cwd, linkedNumber) };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { kind: 'no-gh' };
     }
-    log(`pr: gh lookup failed: ${ghErrorMessage(error)}`);
+    log(`pr: gh lookup failed: ${errorMessage(error)}`);
     return { kind: 'none' };
   }
 }
 
+/** The GitHub compare URL for the current branch — the "create a PR" page. */
 async function compareUrl(cwd: string): Promise<string | undefined> {
   try {
-    const { stdout: branchOut } = await run('git', ['branch', '--show-current'], { cwd });
-    const branch = branchOut.trim();
+    const branch = (await git(['branch', '--show-current'], cwd)).trim();
     if (!branch) {
       return undefined;
     }
@@ -515,8 +511,3 @@ async function compareUrl(cwd: string): Promise<string | undefined> {
     return undefined;
   }
 }
-
-function openUrlCommand(url: string): vscode.Command {
-  return { command: 'vscode.open', title: 'Open on GitHub', arguments: [vscode.Uri.parse(url)] };
-}
-

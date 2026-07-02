@@ -20,7 +20,6 @@ interface Repository {
   readonly state: RepositoryState;
   getMergeBase(ref1: string, ref2: string): Promise<string | undefined>;
   diffWith(ref: string): Promise<Change[]>;
-  getBranches?(query: { remote?: boolean }): Promise<{ name?: string }[]>;
 }
 
 interface GitApi {
@@ -84,7 +83,7 @@ export interface BranchComparison {
  */
 export async function changedFilesVsBranch(
   folderUri: vscode.Uri,
-  branch: string
+  branch: string,
 ): Promise<BranchComparison | undefined> {
   const repository = await openRepository(folderUri);
   if (!repository) {
@@ -126,30 +125,13 @@ export async function gitUriAtRef(uri: vscode.Uri, ref: string): Promise<vscode.
   }
 }
 
-/** Branch names (local and remote) of the folder's repository, for pickers. */
-export async function listBranchNames(folderUri: vscode.Uri): Promise<string[]> {
-  const repository = await openRepository(folderUri);
-  if (!repository?.getBranches) {
-    return [];
-  }
-  try {
-    const branches = await repository.getBranches({ remote: true });
-    const names = branches
-      .map((branch) => branch.name)
-      .filter((name): name is string => Boolean(name));
-    return [...new Set(names)];
-  } catch {
-    return [];
-  }
-}
-
 /**
  * Subscribes to the folder's repository state (commits, stage/unstage, file
  * edits git notices). Undefined when there's no repository.
  */
 export async function onRepositoryStateChanged(
   folderUri: vscode.Uri,
-  listener: () => void
+  listener: () => void,
 ): Promise<vscode.Disposable | undefined> {
   const repository = await openRepository(folderUri);
   return repository?.state.onDidChange(listener);

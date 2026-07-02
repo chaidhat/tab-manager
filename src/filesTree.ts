@@ -1,11 +1,15 @@
-import { execFile } from 'child_process';
 import * as path from 'path';
-import { promisify } from 'util';
 import * as vscode from 'vscode';
+import { git } from './cli';
 import { OPEN_DIFF } from './fileCommands';
 import { FileEntry, listDirectory } from './files';
-import { changedFilesVsBranch, ensureRepositoryOpen, onRepositoryStateChanged } from './git';
+import {
+  changedFilesVsBranch,
+  ensureRepositoryOpen,
+  onRepositoryStateChanged,
+} from './gitExtension';
 import { log } from './log';
+import { resolveWorktreePr } from './pr';
 import { LayoutStore } from './store';
 
 export type FilesElement = FileEntry;
@@ -20,9 +24,11 @@ export type FilesElement = FileEntry;
  * the cost of VS Code also showing that row's file-type icon — an unavoidable
  * pairing, there is no way to get decorated text without it.
  *
- * A checkbox row at the top optionally filters the tree to files that differ
- * from a chosen branch (merge-base semantics plus uncommitted changes);
- * folders show only while they contain changed files.
+ * The tree is filtered to files that differ from the worktree's PR base
+ * branch — the branch the PR merges into, resolved via `gh` — falling back
+ * to the repo's default branch when there's no PR (merge-base semantics plus
+ * uncommitted changes). Folders show only while they contain changed files.
+ * When the comparison can't be made, the full tree is shown instead.
  */
 export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>, vscode.Disposable {
   private readonly emitter = new vscode.EventEmitter<void>();
@@ -36,7 +42,12 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
   private changedFiles: Set<string> | undefined;
   private changedDirs: Set<string> | undefined;
   private compareBase: string | undefined;
+  /** Display name of the ref being compared against, for diff-tab titles. */
+  private compareLabel: string | undefined;
   private warnedFilterKey: string | undefined;
+  // Both caches avoid re-spawning `gh`/`git` on every re-render; keyed so a
+  // different root (or re-linked PR) recomputes.
+  private cachedCompareRef: { key: string; ref: string | undefined } | undefined;
   private detectedDefault: { root: string; branch: string | undefined } | undefined;
 
   constructor(private readonly store: LayoutStore) {
@@ -58,12 +69,14 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
   }
 
   private signature(): string {
-    const { activeFolderUri, compareBranch } = this.store;
-    return `${activeFolderUri}|${compareBranch}`;
+    const active = this.store.activeFolderUri;
+    const linked = active ? this.store.linkedPr(active)?.number : undefined;
+    return `${active}|${linked}`;
   }
 
   private applyStoreState(): void {
     this.stateSignature = this.signature();
+    this.cachedCompareRef = undefined;
     this.watch();
     const root = this.rootUri();
     if (root) {
@@ -92,7 +105,7 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
     this.watcher = vscode.Disposable.from(
       fsWatcher,
       fsWatcher.onDidCreate(scheduleRefresh),
-      fsWatcher.onDidDelete(scheduleRefresh)
+      fsWatcher.onDidDelete(scheduleRefresh),
     );
   }
 
@@ -133,7 +146,7 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
     return entries.filter((entry) =>
       entry.isDirectory
         ? this.changedDirs!.has(entry.uri.fsPath)
-        : this.changedFiles!.has(entry.uri.fsPath)
+        : this.changedFiles!.has(entry.uri.fsPath),
     );
   }
 
@@ -142,7 +155,8 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
     this.changedFiles = undefined;
     this.changedDirs = undefined;
     this.compareBase = undefined;
-    const branch = this.store.compareBranch ?? (await this.defaultBranch(root));
+    this.compareLabel = undefined;
+    const branch = await this.compareRef(root);
     if (!branch) {
       return;
     }
@@ -164,6 +178,24 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
     this.changedFiles = comparison.files;
     this.changedDirs = dirs;
     this.compareBase = comparison.base;
+    this.compareLabel = branch;
+  }
+
+  /**
+   * The ref changed files are compared against: the base branch of the
+   * worktree's PR (as `origin/<base>`, so a stale or missing local branch
+   * can't skew the merge-base), else the repo's default branch when there
+   * is no PR.
+   */
+  private async compareRef(root: vscode.Uri): Promise<string | undefined> {
+    const linked = this.store.linkedPr(root.toString())?.number;
+    const key = `${root.toString()}|${linked}`;
+    if (this.cachedCompareRef?.key !== key) {
+      const pr = await resolveWorktreePr(root.fsPath, linked);
+      const ref = pr ? `origin/${pr.baseRefName}` : await this.defaultBranch(root);
+      this.cachedCompareRef = { key, ref };
+    }
+    return this.cachedCompareRef.ref;
   }
 
   private warnFilterUnavailable(root: vscode.Uri, branch: string): void {
@@ -173,7 +205,7 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
       this.warnedFilterKey = key;
       vscode.window.showWarningMessage(
         `Tab Manager can't compare this worktree against "${branch}" — showing all files. ` +
-          'Check that the branch exists (click the filter row to pick another).'
+          'Check that the branch exists on the remote (try fetching).',
       );
     }
   }
@@ -183,10 +215,9 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
     if (this.detectedDefault?.root !== root.toString()) {
       let branch: string | undefined;
       try {
-        const { stdout } = await promisify(execFile)(
-          'git',
+        const stdout = await git(
           ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
-          { cwd: root.fsPath }
+          root.fsPath,
         );
         branch = stdout.trim() || undefined;
       } catch {
@@ -211,14 +242,14 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
       node.name,
       node.isDirectory
         ? vscode.TreeItemCollapsibleState.Collapsed
-        : vscode.TreeItemCollapsibleState.None
+        : vscode.TreeItemCollapsibleState.None,
     );
     item.resourceUri = node.uri;
     item.contextValue = node.isDirectory ? 'fileDirectory' : 'fileLeaf';
     if (!node.isDirectory) {
       // A changed file opens as a diff against the compare base; files shown
       // in the unfiltered fallback (diff unavailable) open normally.
-      const branch = this.store.compareBranch ?? this.detectedDefault?.branch;
+      const branch = this.compareLabel;
       const asDiff =
         this.compareBase !== undefined &&
         branch !== undefined &&

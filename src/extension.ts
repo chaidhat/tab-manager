@@ -27,7 +27,7 @@ export function activate(context: vscode.ExtensionContext): void {
     worktreesProvider,
     changedFilesProvider,
     vscode.window.registerTreeDataProvider('tab-manager.worktreeFiles', changedFilesProvider),
-    vscode.window.registerTreeDataProvider('tab-manager.layouts', worktreesProvider)
+    vscode.window.registerTreeDataProvider('tab-manager.layouts', worktreesProvider),
   );
 
   registerCommands(context, store, () => worktreesProvider.refresh());
