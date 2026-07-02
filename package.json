@@ -6,8 +6,13 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other"],
-  "activationEvents": ["onView:tab-manager.layouts"],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:tab-manager.layouts",
+    "onView:tab-manager.files"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -25,44 +30,111 @@
           "type": "tree",
           "id": "tab-manager.layouts",
           "name": "Layouts"
+        },
+        {
+          "type": "tree",
+          "id": "tab-manager.files",
+          "name": "Files"
         }
       ]
     },
     "viewsWelcome": [
       {
         "view": "tab-manager.layouts",
-        "contents": "Save your current editor arrangement — the panes and the files in them — as a layout, then switch between layouts anytime.\n[Save Current Layout](command:tabManager.saveLayout)"
+        "contents": "Open a folder or workspace to manage editor layouts — each worktree in the workspace keeps one layout, and clicking a worktree switches to it."
+      },
+      {
+        "view": "tab-manager.files",
+        "contents": "Click a worktree in the Layouts section above to browse its files."
       }
     ],
+    "configuration": {
+      "title": "Tab Manager",
+      "properties": {
+        "tabManager.hidePanelOnSwitch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Collapse the bottom panel after switching layouts (where live terminals are kept while not in use)."
+        }
+      }
+    },
     "commands": [
       {
         "command": "tabManager.saveLayout",
-        "title": "Save Current Layout",
+        "title": "Save Current Arrangement to Active Worktree",
         "category": "Tab Manager",
         "icon": "$(add)"
       },
       {
         "command": "tabManager.applyLayout",
-        "title": "Apply Layout",
+        "title": "Switch to Worktree Layout",
         "category": "Tab Manager"
       },
       {
-        "command": "tabManager.updateLayout",
-        "title": "Update Layout from Current Arrangement",
-        "category": "Tab Manager",
-        "icon": "$(save)"
-      },
-      {
-        "command": "tabManager.renameLayout",
-        "title": "Rename Layout",
-        "category": "Tab Manager",
-        "icon": "$(edit)"
-      },
-      {
-        "command": "tabManager.deleteLayout",
-        "title": "Delete Layout",
+        "command": "tabManager.clearLayout",
+        "title": "Clear Saved Layout",
         "category": "Tab Manager",
         "icon": "$(trash)"
+      },
+      {
+        "command": "tabManager.newFile",
+        "title": "New File...",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.newFolder",
+        "title": "New Folder...",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.revealInFinder",
+        "title": "Reveal in Finder",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.openToSide",
+        "title": "Open to the Side",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.openWith",
+        "title": "Open With...",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.cutFile",
+        "title": "Cut",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.copyFile",
+        "title": "Copy",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.pasteFile",
+        "title": "Paste",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.copyPath",
+        "title": "Copy Path",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.copyRelativePath",
+        "title": "Copy Relative Path",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.renameFile",
+        "title": "Rename...",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.deleteFile",
+        "title": "Delete",
+        "category": "Tab Manager"
       }
     ],
     "menus": {
@@ -75,19 +147,69 @@
       ],
       "view/item/context": [
         {
-          "command": "tabManager.updateLayout",
-          "when": "view == tab-manager.layouts && viewItem == layout",
-          "group": "inline@1"
+          "command": "tabManager.clearLayout",
+          "when": "view == tab-manager.layouts && viewItem == worktreeWithLayout",
+          "group": "inline"
         },
         {
-          "command": "tabManager.renameLayout",
-          "when": "view == tab-manager.layouts && viewItem == layout",
-          "group": "inline@2"
+          "command": "tabManager.newFile",
+          "when": "view == tab-manager.files && viewItem == fileDirectory",
+          "group": "1_open@1"
         },
         {
-          "command": "tabManager.deleteLayout",
-          "when": "view == tab-manager.layouts && viewItem == layout",
-          "group": "inline@3"
+          "command": "tabManager.newFolder",
+          "when": "view == tab-manager.files && viewItem == fileDirectory",
+          "group": "1_open@2"
+        },
+        {
+          "command": "tabManager.openToSide",
+          "when": "view == tab-manager.files && viewItem == fileLeaf",
+          "group": "1_open@1"
+        },
+        {
+          "command": "tabManager.openWith",
+          "when": "view == tab-manager.files && viewItem == fileLeaf",
+          "group": "1_open@2"
+        },
+        {
+          "command": "tabManager.revealInFinder",
+          "when": "view == tab-manager.files && viewItem =~ /^file/",
+          "group": "1_open@3"
+        },
+        {
+          "command": "tabManager.cutFile",
+          "when": "view == tab-manager.files && viewItem =~ /^file/",
+          "group": "2_clipboard@1"
+        },
+        {
+          "command": "tabManager.copyFile",
+          "when": "view == tab-manager.files && viewItem =~ /^file/",
+          "group": "2_clipboard@2"
+        },
+        {
+          "command": "tabManager.pasteFile",
+          "when": "view == tab-manager.files && viewItem == fileDirectory && tabManager.canPaste",
+          "group": "2_clipboard@3"
+        },
+        {
+          "command": "tabManager.copyPath",
+          "when": "view == tab-manager.files && viewItem =~ /^file/",
+          "group": "3_path@1"
+        },
+        {
+          "command": "tabManager.copyRelativePath",
+          "when": "view == tab-manager.files && viewItem =~ /^file/",
+          "group": "3_path@2"
+        },
+        {
+          "command": "tabManager.renameFile",
+          "when": "view == tab-manager.files && viewItem =~ /^file/",
+          "group": "4_mutate@1"
+        },
+        {
+          "command": "tabManager.deleteFile",
+          "when": "view == tab-manager.files && viewItem =~ /^file/",
+          "group": "4_mutate@2"
         }
       ],
       "commandPalette": [
@@ -96,15 +218,55 @@
           "when": "false"
         },
         {
-          "command": "tabManager.updateLayout",
+          "command": "tabManager.clearLayout",
           "when": "false"
         },
         {
-          "command": "tabManager.renameLayout",
+          "command": "tabManager.newFile",
           "when": "false"
         },
         {
-          "command": "tabManager.deleteLayout",
+          "command": "tabManager.newFolder",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.revealInFinder",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.openToSide",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.openWith",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.cutFile",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.copyFile",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.pasteFile",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.copyPath",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.copyRelativePath",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.renameFile",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.deleteFile",
           "when": "false"
         }
       ]
@@ -113,12 +275,14 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node dist/test/runTests.js",
     "vscode:prepublish": "npm run compile",
     "start": "npm run compile && code --extensionDevelopmentPath=\"$PWD\" --new-window ."
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
     "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^3.0.0",
     "typescript": "^5.4.0"
   }
 }

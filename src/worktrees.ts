@@ -1,0 +1,142 @@
+import * as path from 'path';
+import * as vscode from 'vscode';
+
+/** A folder to show in the sidebar — an open workspace folder or a discovered one. */
+export interface FolderRef {
+  readonly uri: vscode.Uri;
+  readonly name: string;
+}
+
+/** Folders that belong to the same git repository. */
+export interface RepoGroup {
+  /** Absolute path of the repository root, or undefined for non-git folders. */
+  readonly repoRoot: string | undefined;
+  readonly name: string;
+  readonly folders: FolderRef[];
+}
+
+const CLAUDE_WORKTREES_DIR = '.claude/worktrees';
+
+/**
+ * Groups workspace folders by the git repository they belong to, so several
+ * worktrees of one repo share a section. For every repo with an open folder,
+ * also discovers sibling worktrees under `<repoRoot>/.claude/worktrees/*` —
+ * the convention this user's tooling uses to create worktrees — so they show
+ * up without being manually added to the VS Code workspace. Non-git folders
+ * are collected into a single trailing "Folders" group.
+ */
+export async function groupFoldersByRepo(
+  folders: readonly vscode.WorkspaceFolder[]
+): Promise<RepoGroup[]> {
+  const repos = new Map<string, { name: string; folders: FolderRef[] }>();
+  const nonGit: FolderRef[] = [];
+
+  for (const folder of folders) {
+    const ref: FolderRef = { uri: folder.uri, name: folder.name };
+    const repoRoot = await repoRootOf(folder.uri);
+    if (repoRoot === undefined) {
+      nonGit.push(ref);
+      continue;
+    }
+    addFolder(repos, repoRoot, ref);
+  }
+
+  for (const [repoRoot, group] of repos) {
+    for (const discovered of await discoverClaudeWorktrees(repoRoot)) {
+      if (!group.folders.some((existing) => existing.uri.fsPath === discovered.uri.fsPath)) {
+        group.folders.push(discovered);
+      }
+    }
+  }
+
+  const groups: RepoGroup[] = [...repos.entries()].map(([repoRoot, group]) => ({
+    repoRoot,
+    ...group,
+  }));
+  if (nonGit.length > 0) {
+    groups.push({ repoRoot: undefined, name: 'Folders', folders: nonGit });
+  }
+  return groups;
+}
+
+function addFolder(
+  repos: Map<string, { name: string; folders: FolderRef[] }>,
+  repoRoot: string,
+  ref: FolderRef
+): void {
+  const existing = repos.get(repoRoot);
+  if (existing) {
+    existing.folders.push(ref);
+  } else {
+    repos.set(repoRoot, { name: path.basename(repoRoot), folders: [ref] });
+  }
+}
+
+/**
+ * Resolves the repository root a folder belongs to. A checkout's `.git` is a
+ * directory at the repo root; a linked worktree's `.git` is a file containing
+ * `gitdir: <repo>/.git/worktrees/<name>`, which we follow back to the repo.
+ * Returns undefined for folders that aren't inside a git checkout.
+ */
+async function repoRootOf(folderUri: vscode.Uri): Promise<string | undefined> {
+  const dotGit = vscode.Uri.joinPath(folderUri, '.git');
+  let stat: vscode.FileStat;
+  try {
+    stat = await vscode.workspace.fs.stat(dotGit);
+  } catch {
+    return undefined;
+  }
+
+  if (stat.type & vscode.FileType.Directory) {
+    return folderUri.fsPath;
+  }
+
+  try {
+    const content = new TextDecoder().decode(await vscode.workspace.fs.readFile(dotGit));
+    const gitDirLine = /^gitdir:\s*(.+)\s*$/m.exec(content);
+    if (!gitDirLine) {
+      return folderUri.fsPath;
+    }
+    const gitDir = path.resolve(folderUri.fsPath, gitDirLine[1].trim());
+    const worktreesDir = path.dirname(gitDir); // <repo>/.git/worktrees
+    const commonGitDir = path.dirname(worktreesDir); // <repo>/.git
+    if (path.basename(worktreesDir) === 'worktrees' && path.basename(commonGitDir) === '.git') {
+      return path.dirname(commonGitDir);
+    }
+    return folderUri.fsPath;
+  } catch {
+    return folderUri.fsPath;
+  }
+}
+
+/** Subdirectories of `<repoRoot>/.claude/worktrees` that are git worktrees. */
+async function discoverClaudeWorktrees(repoRoot: string): Promise<FolderRef[]> {
+  const dir = vscode.Uri.file(path.join(repoRoot, CLAUDE_WORKTREES_DIR));
+  let entries: [string, vscode.FileType][];
+  try {
+    entries = await vscode.workspace.fs.readDirectory(dir);
+  } catch {
+    return [];
+  }
+
+  const refs: FolderRef[] = [];
+  for (const [name, type] of entries) {
+    if (!(type & vscode.FileType.Directory)) {
+      continue;
+    }
+    const uri = vscode.Uri.joinPath(dir, name);
+    if (await hasDotGit(uri)) {
+      refs.push({ uri, name });
+    }
+  }
+  return refs;
+}
+
+async function hasDotGit(folderUri: vscode.Uri): Promise<boolean> {
+  try {
+    await vscode.workspace.fs.stat(vscode.Uri.joinPath(folderUri, '.git'));
+    return true;
+  } catch {
+    return false;
+  }
+}

@@ -45,8 +45,11 @@ export interface CapturedLayout {
   activeViewColumn?: number;
 }
 
-/** A saved layout: a captured arrangement plus identity. */
-export interface Layout extends CapturedLayout {
-  id: string;
+/** A worktree row in the sidebar: one folder, one layout slot. */
+export interface WorktreeElement {
+  /** Folder URI string — the key a layout is stored under. */
+  folderUri: string;
   name: string;
+  /** Whether this folder is currently open in the VS Code workspace. */
+  isOpen: boolean;
 }
