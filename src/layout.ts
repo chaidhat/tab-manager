@@ -64,6 +64,10 @@ export async function applyLayout(
     for (const tab of group.tabs) {
       if (tab.kind === 'terminal') {
         await terminals.revive(tab, group.viewColumn, context.targetFolderUri);
+      } else if (tab.kind === 'diff') {
+        if (!(await showDiff(tab, group.viewColumn))) {
+          missing.push(tab.modified);
+        }
       } else if (!(await show(tab.uri, group.viewColumn, true))) {
         missing.push(tab.uri);
       }
@@ -125,6 +129,25 @@ async function restoreFocus(layout: CapturedLayout, groups: GroupSnapshot[]): Pr
   }
 }
 
+/** Reopens a diff editor in a pane; returns false if it can't be opened. */
+async function showDiff(
+  tab: Extract<TabRef, { kind: 'diff' }>,
+  viewColumn: number
+): Promise<boolean> {
+  try {
+    await vscode.commands.executeCommand(
+      'vscode.diff',
+      vscode.Uri.parse(tab.original),
+      vscode.Uri.parse(tab.modified),
+      tab.label,
+      { viewColumn, preview: false, preserveFocus: true }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Opens a document in a pane; returns false if the file can't be opened. */
 async function show(uri: string, viewColumn: number, preserveFocus: boolean): Promise<boolean> {
   try {
@@ -140,13 +163,21 @@ async function show(uri: string, viewColumn: number, preserveFocus: boolean): Pr
 }
 
 /**
- * Reduces a tab to a reopenable reference. Text editors and editor-area
- * terminals are supported; diffs, notebooks and webviews are skipped. This is
- * the single place to extend support for other tab kinds.
+ * Reduces a tab to a reopenable reference. Text editors, diff editors, and
+ * editor-area terminals are supported; notebooks and webviews are skipped.
+ * This is the single place to extend support for other tab kinds.
  */
 function toTabRef(tab: vscode.Tab): TabRef | undefined {
   if (tab.input instanceof vscode.TabInputText) {
     return { kind: 'file', uri: tab.input.uri.toString() };
+  }
+  if (tab.input instanceof vscode.TabInputTextDiff) {
+    return {
+      kind: 'diff',
+      original: tab.input.original.toString(),
+      modified: tab.input.modified.toString(),
+      label: tab.label,
+    };
   }
   if (tab.input instanceof vscode.TabInputTerminal) {
     // TabInputTerminal carries no data, so the tab label is our only handle on
@@ -158,6 +189,15 @@ function toTabRef(tab: vscode.Tab): TabRef | undefined {
 
 function uriOf(tab: vscode.Tab | undefined): string | undefined {
   return tab?.input instanceof vscode.TabInputText ? tab.input.uri.toString() : undefined;
+}
+
+/** One-line shape summary for the log, e.g. "2 groups: [file,terminal] [file]". */
+export function describeLayout(layout: CapturedLayout): string {
+  const groups = [...layout.groups]
+    .sort((a, b) => a.viewColumn - b.viewColumn)
+    .map((group) => `[${group.tabs.map((tab) => tab.kind).join(',')}]`)
+    .join(' ');
+  return `${layout.groups.length} group(s): ${groups}`;
 }
 
 /**
@@ -173,9 +213,11 @@ export function owningFolderUri(layout: CapturedLayout): string | undefined {
       const uri =
         tab.kind === 'file'
           ? vscode.Uri.parse(tab.uri)
-          : tab.cwd
-            ? vscode.Uri.file(tab.cwd)
-            : undefined;
+          : tab.kind === 'diff'
+            ? vscode.Uri.parse(tab.modified)
+            : tab.cwd
+              ? vscode.Uri.file(tab.cwd)
+              : undefined;
       const folder = uri && vscode.workspace.getWorkspaceFolder(uri);
       if (folder) {
         const key = folder.uri.toString();

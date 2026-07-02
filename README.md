@@ -7,7 +7,7 @@ the same way the built-in Explorer stacks Outline/Timeline/Dependencies.
 ```
 ▾ LAYOUTS
   ▾ tab-manager                    ← repository (collapsible)
-      trenton        ● active      ← worktree, holds one layout
+      trenton        ●             ← worktree, holds one layout (● = active)
       velvety
   ▾ other-repo
       main           no layout
@@ -37,8 +37,37 @@ saved back to the worktree you were on.
    without a saved layout starts **blank** (no panes) rather than keeping
    whatever was open before — arrange it and switch away to save it.
 
-Hover a worktree for the **trash** icon to clear its saved layout. The **＋**
-title button force-saves the current arrangement into the active worktree.
+Hover a **repo** section for the **＋** icon: it creates a new worktree for
+that repo under `.claude/worktrees/<name>`, on a new branch of the same name,
+and it appears in the list immediately.
+
+Hover a worktree for the **copy** icon (copy its absolute path), the **×**
+icon (clear its saved layout) and, on worktrees not open in the workspace, the
+**trash** icon (**delete the worktree** — directory and all, via `git worktree
+remove`; modal-confirmed, with an explicit force step if the worktree has
+uncommitted changes). Force-saving the current arrangement into the active
+worktree is available from the command palette ("Tab Manager: Save Current
+Arrangement to Active Worktree"); switching auto-saves anyway.
+
+A worktree linked to a PR (right-click → **Link with PR...**) displays the
+**PR's title** as its row label; the folder name and PR number stay in the
+tooltip. The title re-syncs whenever the PR view fetches it or you rename the
+PR from there.
+
+## Pull Request
+
+Right-click a worktree in **Layouts** → **Link with PR...** to associate it
+with a pull request (pick from the repo's open PRs, or type a number; the same
+menu unlinks). The **Pull Request** view shows the active worktree's PR — the
+linked one, or failing that the current branch's, looked up with the GitHub
+CLI (`gh`) — and is an editing surface:
+
+- **Rename PR...** — change the title in an input box.
+- **Edit description...** — opens the PR body as a markdown file; every save
+  (⌘S) publishes it back to the PR.
+
+Clicking the PR row itself opens it on GitHub; with no PR, a row links to
+GitHub's compare page. Refresh with the title-bar button after pushing.
 
 Terminals stay alive across switches: when you leave a worktree its editor-area
 terminals are tucked into the bottom panel (still running) and pulled back when
@@ -66,6 +95,18 @@ trade-off: getting that coloring requires each row to carry a `resourceUri`,
 and VS Code always pairs that with a small file-type icon — there's no
 supported way to get colored text without it (a
 [longstanding open VS Code limitation](https://github.com/microsoft/vscode/issues/54281)).
+
+A checkbox row at the top — **Only files changed vs \<branch\>** — filters the
+tree down to files that differ from a branch of your choice (what a PR against
+it would contain: committed changes since the merge-base, plus uncommitted and
+untracked files). Folders show only while they contain changed files. Click
+the row's label to pick the branch (e.g. `staging`); the choice is remembered
+per workspace, and the list refreshes as you edit, stage, or commit.
+
+While the filter is on, clicking a file opens it as a **diff** against the
+compare branch's merge-base (files that didn't exist there diff against empty
+content — an all-added view). With the filter off, clicking opens the file
+normally.
 
 Right-clicking gives the usual Explorer-style menu. On a folder: New File...,
 New Folder..., Reveal in Finder, Cut, Copy, Paste, Copy Path, Copy Relative

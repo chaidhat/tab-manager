@@ -43,53 +43,132 @@ const FOCUS_GROUP_COMMANDS = [
 export class TerminalManager {
   /** Parked terminals awaiting revival, keyed by the worktree they belong to. */
   private readonly pools = new Map<string, vscode.Terminal[]>();
+  private beaconReady = false;
+
+  constructor(private readonly storageUri: vscode.Uri) {}
+
+  /**
+   * The location-probe beacon must be a REAL file: an empty untitled editor
+   * gets auto-discarded by VS Code the moment it loses focus (mid-probe),
+   * which collapses the active tab back onto a terminal tab and poisons the
+   * classification. A file in extension storage sticks around and still
+   * closes silently.
+   */
+  private async beaconFileUri(): Promise<vscode.Uri> {
+    const uri = vscode.Uri.joinPath(this.storageUri, 'location-probe.txt');
+    if (!this.beaconReady) {
+      await vscode.workspace.fs.createDirectory(this.storageUri);
+      try {
+        await vscode.workspace.fs.stat(uri);
+      } catch {
+        await vscode.workspace.fs.writeFile(
+          uri,
+          new TextEncoder().encode('Tab Manager terminal-location probe\n')
+        );
+      }
+      this.beaconReady = true;
+    }
+    return uri;
+  }
 
   /**
    * Moves every editor-area terminal into the panel (still running) and pools
-   * it under `poolKey`. Must be called after file tabs are closed — see the
-   * class doc for why parking is driven by group focus rather than names.
+   * it under `poolKey`. Must be called after file tabs are closed.
+   *
+   * Identity is never inferred from focus state: handles are first CLASSIFIED
+   * by location (see {@link classifyEditorTerminals}), then each editor
+   * terminal is shown — giving that exact handle widget focus — and moved,
+   * with the move verified by the editor terminal-tab count dropping. Panel
+   * terminals are never touched. Two lessons are baked in: focusing an editor
+   * GROUP does not flip `window.activeTerminal`, and the move command targets
+   * the editor-area terminal even when a panel terminal has keyboard focus —
+   * so neither can identify which handle moved.
    */
   async parkEditorTerminals(poolKey: string | undefined): Promise<number> {
     const pool = this.pool(poolKey);
     let parked = 0;
 
-    // Bounded loop: each pass parks one terminal; bail out on any failure to
-    // make progress rather than risk spinning.
-    for (let guard = 0; guard < 32; guard++) {
-      const group = groupWithTerminalTab();
-      if (!group) {
-        break;
+    // Focus side-effects from one probe can spill into the next (a shown
+    // terminal re-selects sibling tabs asynchronously), so a candidate can be
+    // skipped defensively — or a probe can false-negative under load. Later
+    // rounds pick up whatever earlier ones missed.
+    for (let round = 0; round < 3 && countEditorTerminalTabs() > 0; round++) {
+      for (const terminal of await this.classifyEditorTerminals()) {
+        const before = countEditorTerminalTabs();
+        try {
+          terminal.show(false);
+          await settled(() => vscode.window.activeTerminal === terminal, 400);
+          await vscode.commands.executeCommand(MOVE_TO_PANEL);
+        } catch (error) {
+          log(`park: failed to move "${terminal.name}": ${String(error)}`);
+          continue;
+        }
+        if (await settled(() => countEditorTerminalTabs() < before, 1500)) {
+          pool.push(terminal);
+          parked++;
+          log(`park: pooled "${terminal.name}" under ${poolKey ?? '(none)'}`);
+        } else {
+          log(`park: "${terminal.name}" did not leave the editor area`);
+        }
       }
-      const before = countEditorTerminalTabs();
-      try {
-        await focusEditorGroup(group.viewColumn);
-        await vscode.commands.executeCommand(MOVE_TO_PANEL);
-      } catch (error) {
-        log(`park: move command failed in column ${group.viewColumn}: ${String(error)}`);
-        break;
-      }
-      // The tab model updates asynchronously after the move; wait for it so
-      // the next pass sees fresh state (and so we know the move worked).
-      if (!(await settled(() => countEditorTerminalTabs() < before))) {
-        log(`park: no progress in column ${group.viewColumn} (still ${before} terminal tabs)`);
-        break;
-      }
-      // The just-moved terminal ends up focused in the panel. Wait for the
-      // active-terminal model to catch up before trusting it.
-      await settled(() => {
-        const active = vscode.window.activeTerminal;
-        return active !== undefined && !this.isPooled(active);
-      }, 500);
-      const moved = vscode.window.activeTerminal;
-      if (moved && !this.isPooled(moved)) {
-        pool.push(moved);
-        log(`park: pooled "${moved.name}" under ${poolKey ?? '(none)'}`);
-      } else {
-        log(`park: moved a terminal but could not identify it; it stays in the panel`);
-      }
-      parked++;
+    }
+    if (countEditorTerminalTabs() > 0) {
+      log(`park: ${countEditorTerminalTabs()} editor terminal tab(s) could not be parked`);
     }
     return parked;
+  }
+
+  /**
+   * Which live handles are editor-area terminals. There is no API for a
+   * terminal's location, so each handle is probed against a throwaway
+   * untitled "beacon" editor that takes focus first: showing an EDITOR
+   * terminal moves the active tab off the beacon onto a terminal tab, while
+   * showing a PANEL terminal leaves the beacon active. The beacon is reset
+   * before each probe and closed afterwards.
+   */
+  private async classifyEditorTerminals(): Promise<vscode.Terminal[]> {
+    const beaconUri = await this.beaconFileUri();
+    const beacon = await vscode.workspace.openTextDocument(beaconUri);
+    // The beacon gets a group of its OWN, one column past the last: showing a
+    // panel terminal re-selects a terminal tab sharing the beacon's group
+    // (observed, deterministic), which poisons the signal. In a dedicated
+    // group there is no terminal sibling to steal the selection. The empty
+    // group auto-closes when the beacon closes.
+    const beaconColumn = Math.min(vscode.window.tabGroups.all.length + 1, 9);
+    const editorTerminals: vscode.Terminal[] = [];
+    try {
+      for (const terminal of [...vscode.window.terminals]) {
+        if (this.isPooled(terminal) || terminal.exitStatus !== undefined) {
+          continue;
+        }
+        // Confirm the beacon is active before probing — with retries, since a
+        // just-shown terminal can asynchronously knock it off right after.
+        let baselineClean = false;
+        for (let attempt = 0; attempt < 3 && !baselineClean; attempt++) {
+          await vscode.window.showTextDocument(beacon, {
+            viewColumn: beaconColumn,
+            preview: false,
+            preserveFocus: false,
+          });
+          baselineClean = await settled(() => activeTabIs(beaconUri), 800);
+        }
+        if (!baselineClean) {
+          // Probing from a dirty baseline misclassifies — skip; the second
+          // park round will retry this candidate.
+          log(`park: beacon lost before probing "${terminal.name}" (${describeActiveTab()})`);
+          continue;
+        }
+        terminal.show(false);
+        const isEditor = await settled(() => activeTabIsTerminal(), 1000);
+        log(`park: probe "${terminal.name}" → ${isEditor ? 'editor' : 'panel'} (${describeActiveTab()})`);
+        if (isEditor) {
+          editorTerminals.push(terminal);
+        }
+      }
+    } finally {
+      await closeTabOf(beaconUri);
+    }
+    return editorTerminals;
   }
 
   /**
@@ -113,8 +192,14 @@ export class TerminalManager {
       // reveal does not reliably make ours the active one — moving whatever
       // happened to be focused instead was a source of misplaced terminals.
       await focusEditorGroup(viewColumn);
-      terminal.show(false);
-      if (!(await settled(() => vscode.window.activeTerminal === terminal, 500))) {
+      // The focus wait gets a retry: a single missed window here would mint
+      // a duplicate via the fresh-shell fallback.
+      let focused = false;
+      for (let attempt = 0; attempt < 2 && !focused; attempt++) {
+        terminal.show(false);
+        focused = await settled(() => vscode.window.activeTerminal === terminal, 800);
+      }
+      if (!focused) {
         // Never run the move while some other terminal is focused — that
         // would yank the wrong one (possibly the user's) into the layout.
         log(`revive: "${terminal.name}" did not become active; re-pooling, fresh shell instead`);
@@ -192,10 +277,35 @@ function countEditorTerminalTabs(): number {
     .filter((tab) => tab.input instanceof vscode.TabInputTerminal).length;
 }
 
-function groupWithTerminalTab(): vscode.TabGroup | undefined {
-  return vscode.window.tabGroups.all.find((group) =>
-    group.tabs.some((tab) => tab.input instanceof vscode.TabInputTerminal)
+function activeTabIsTerminal(): boolean {
+  return (
+    vscode.window.tabGroups.activeTabGroup?.activeTab?.input instanceof vscode.TabInputTerminal
   );
+}
+
+function describeActiveTab(): string {
+  const group = vscode.window.tabGroups.activeTabGroup;
+  const tab = group?.activeTab;
+  const kind = tab?.input?.constructor?.name ?? 'none';
+  return `active tab "${tab?.label ?? '(none)'}" [${kind}] in column ${group?.viewColumn}`;
+}
+
+function activeTabIs(uri: vscode.Uri): boolean {
+  const input = vscode.window.tabGroups.activeTabGroup?.activeTab?.input;
+  return input instanceof vscode.TabInputText && input.uri.toString() === uri.toString();
+}
+
+async function closeTabOf(uri: vscode.Uri): Promise<void> {
+  const tab = vscode.window.tabGroups.all
+    .flatMap((group) => group.tabs)
+    .find(
+      (candidate) =>
+        candidate.input instanceof vscode.TabInputText &&
+        candidate.input.uri.toString() === uri.toString()
+    );
+  if (tab) {
+    await vscode.window.tabGroups.close(tab, true);
+  }
 }
 
 async function focusEditorGroup(viewColumn: number): Promise<void> {

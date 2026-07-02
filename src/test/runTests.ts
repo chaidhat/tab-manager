@@ -19,6 +19,9 @@ async function main(): Promise<void> {
   fs.mkdirSync(wtA);
   fs.mkdirSync(wtB);
   fs.writeFileSync(path.join(wtA, 'a.ts'), 'export const a = 1;\n');
+  for (const name of ['x.ts', 'y.ts', 'z.ts', 'w.ts']) {
+    fs.writeFileSync(path.join(wtB, name), `export const v = '${name}';\n`);
+  }
 
   const workspaceFile = path.join(workspaceRoot, 'test.code-workspace');
   fs.writeFileSync(workspaceFile, JSON.stringify({ folders: [{ path: 'wtA' }, { path: 'wtB' }] }));
@@ -26,6 +29,9 @@ async function main(): Promise<void> {
   await runTests({
     extensionDevelopmentPath,
     extensionTestsPath,
+    // e.g. `node dist/test/runTests.js stacked` runs only the stacked-tabs
+    // scenario (pure files — none of the focus-sensitive terminal moves).
+    extensionTestsEnv: { TAB_MANAGER_ONLY: process.argv[2] ?? '' },
     launchArgs: [
       workspaceFile,
       '--disable-extensions',

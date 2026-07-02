@@ -35,6 +35,11 @@
           "type": "tree",
           "id": "tab-manager.files",
           "name": "Files"
+        },
+        {
+          "type": "tree",
+          "id": "tab-manager.pr",
+          "name": "Pull Request"
         }
       ]
     },
@@ -46,6 +51,10 @@
       {
         "view": "tab-manager.files",
         "contents": "Click a worktree in the Layouts section above to browse its files."
+      },
+      {
+        "view": "tab-manager.pr",
+        "contents": "Click a worktree in the Layouts section above to see its pull request."
       }
     ],
     "configuration": {
@@ -74,7 +83,7 @@
         "command": "tabManager.clearLayout",
         "title": "Clear Saved Layout",
         "category": "Tab Manager",
-        "icon": "$(trash)"
+        "icon": "$(close)"
       },
       {
         "command": "tabManager.newFile",
@@ -135,21 +144,90 @@
         "command": "tabManager.deleteFile",
         "title": "Delete",
         "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.pickCompareBranch",
+        "title": "Pick Compare Branch",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.openDiff",
+        "title": "Open Changes",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.deleteWorktree",
+        "title": "Delete Worktree",
+        "category": "Tab Manager",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "tabManager.copyWorktreePath",
+        "title": "Copy Worktree Path",
+        "category": "Tab Manager",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "tabManager.newWorktree",
+        "title": "New Worktree",
+        "category": "Tab Manager",
+        "icon": "$(add)"
+      },
+      {
+        "command": "tabManager.refreshPr",
+        "title": "Refresh Pull Request",
+        "category": "Tab Manager",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "tabManager.linkPr",
+        "title": "Link with PR...",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.editPrTitle",
+        "title": "Rename PR...",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.editPrDescription",
+        "title": "Edit PR Description...",
+        "category": "Tab Manager"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "tabManager.saveLayout",
-          "when": "view == tab-manager.layouts",
+          "command": "tabManager.refreshPr",
+          "when": "view == tab-manager.pr",
           "group": "navigation"
         }
       ],
       "view/item/context": [
         {
-          "command": "tabManager.clearLayout",
-          "when": "view == tab-manager.layouts && viewItem == worktreeWithLayout",
+          "command": "tabManager.newWorktree",
+          "when": "view == tab-manager.layouts && viewItem == repo-git",
           "group": "inline"
+        },
+        {
+          "command": "tabManager.copyWorktreePath",
+          "when": "view == tab-manager.layouts && viewItem =~ /^worktree/",
+          "group": "inline@0"
+        },
+        {
+          "command": "tabManager.clearLayout",
+          "when": "view == tab-manager.layouts && viewItem =~ /hasLayout/",
+          "group": "inline@1"
+        },
+        {
+          "command": "tabManager.deleteWorktree",
+          "when": "view == tab-manager.layouts && viewItem =~ /worktree.*-closed/",
+          "group": "inline@2"
+        },
+        {
+          "command": "tabManager.linkPr",
+          "when": "view == tab-manager.layouts && viewItem =~ /^worktree/",
+          "group": "1_link"
         },
         {
           "command": "tabManager.newFile",
@@ -268,6 +346,38 @@
         {
           "command": "tabManager.deleteFile",
           "when": "false"
+        },
+        {
+          "command": "tabManager.pickCompareBranch",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.openDiff",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.deleteWorktree",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.linkPr",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.copyWorktreePath",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.newWorktree",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.editPrTitle",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.editPrDescription",
+          "when": "false"
         }
       ]
     }
@@ -281,7 +391,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "^1.125.0",
     "@vscode/test-electron": "^3.0.0",
     "typescript": "^5.4.0"
   }

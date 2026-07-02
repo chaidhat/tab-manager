@@ -5,9 +5,11 @@ import { WorktreeElement } from './types';
 import { groupFoldersByRepo } from './worktrees';
 
 /** A collapsible section for one repository and its worktrees. */
-interface RepoSection {
+export interface RepoSection {
   readonly id: string;
   readonly label: string;
+  /** Absolute repo root — undefined for the non-git "Folders" section. */
+  readonly repoRoot: string | undefined;
   readonly worktrees: WorktreeElement[];
 }
 
@@ -50,6 +52,7 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
       (repo): RepoSection => ({
         id: `repo:${repo.repoRoot ?? 'non-git'}`,
         label: repo.name,
+        repoRoot: repo.repoRoot,
         worktrees: repo.folders.map((folder) => ({
           folderUri: folder.uri.toString(),
           name: folder.name,
@@ -63,28 +66,47 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
     return isRepoSection(element) ? this.repoItem(element) : this.worktreeItem(element);
   }
 
+  /** Re-renders the tree (e.g. after a worktree is created on disk). */
+  refresh(): void {
+    this.emitter.fire();
+  }
+
   private repoItem(section: RepoSection): vscode.TreeItem {
     const item = new vscode.TreeItem(section.label, vscode.TreeItemCollapsibleState.Expanded);
     item.id = section.id;
-    item.contextValue = 'repo';
+    // Only git repos get the inline "+" (New Worktree).
+    item.contextValue = section.repoRoot ? 'repo-git' : 'repo';
     return item;
   }
 
   private worktreeItem(worktree: WorktreeElement): vscode.TreeItem {
     const isActive = worktree.folderUri === this.store.activeFolderUri;
     const hasLayout = this.store.hasLayout(worktree.folderUri);
-    const item = new vscode.TreeItem(worktree.name, vscode.TreeItemCollapsibleState.None);
+    // A worktree linked to a PR takes the PR's title as its display name;
+    // the folder name stays available in the tooltip.
+    const linked = this.store.linkedPr(worktree.folderUri);
+    const label = linked?.title ?? worktree.name;
+    const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
 
     const hints = [!hasLayout && 'no layout', !worktree.isOpen && 'not open'].filter(
       (hint): hint is string => Boolean(hint)
     );
 
     item.id = `worktree:${worktree.folderUri}`;
-    item.contextValue = hasLayout ? 'worktreeWithLayout' : 'worktree';
-    item.description = isActive ? '● active' : hints.join(' · ') || undefined;
+    // Menu `when` clauses match these markers: hasLayout gates "Clear Saved
+    // Layout", closed (not an open workspace folder) gates "Delete Worktree".
+    item.contextValue = [
+      'worktree',
+      hasLayout ? 'hasLayout' : '',
+      worktree.isOpen ? 'open' : 'closed',
+    ]
+      .filter(Boolean)
+      .join('-');
+    item.description = isActive ? '●' : hints.join(' · ') || undefined;
+    const prNote = linked ? ` — PR #${linked.number}` : '';
     item.tooltip = worktree.isOpen
-      ? `Switch to the "${worktree.name}" layout`
-      : `Switch to the "${worktree.name}" layout (opens its files without adding it to the workspace)`;
+      ? `Switch to the "${worktree.name}" layout${prNote}`
+      : `Switch to the "${worktree.name}" layout${prNote} (opens its files without adding it to the workspace)`;
     item.command = {
       command: COMMANDS.apply,
       title: 'Switch to Worktree Layout',

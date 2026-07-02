@@ -1,7 +1,14 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { FileNode } from './filesTree';
+import { FileEntry } from './files';
+import { gitUriAtRef, listBranchNames } from './git';
 import { LayoutStore } from './store';
+
+/** Bound to the Files view's filter row (label click) — exported for it. */
+export const PICK_COMPARE_BRANCH = 'tabManager.pickCompareBranch';
+
+/** Bound to file rows while the changed-only filter is on — exported for the tree. */
+export const OPEN_DIFF = 'tabManager.openDiff';
 
 /** Command ids, mirrored in `package.json` under `contributes.commands`. */
 const FILE_COMMANDS = {
@@ -50,7 +57,7 @@ export function registerFileCommands(
   store: LayoutStore
 ): void {
   const clipboard = new FileClipboard();
-  const register = (id: string, handler: (node: FileNode) => unknown) =>
+  const register = (id: string, handler: (node: FileEntry) => unknown) =>
     context.subscriptions.push(vscode.commands.registerCommand(id, handler));
 
   register(FILE_COMMANDS.newFile, (node) => createEntry(node.uri, 'file'));
@@ -59,7 +66,10 @@ export function registerFileCommands(
     vscode.commands.executeCommand('revealFileInOS', node.uri)
   );
   register(FILE_COMMANDS.openToSide, (node) =>
-    vscode.commands.executeCommand('vscode.open', node.uri, vscode.ViewColumn.Beside)
+    vscode.commands.executeCommand('vscode.open', node.uri, {
+      viewColumn: vscode.ViewColumn.Beside,
+      preview: false,
+    })
   );
   register(FILE_COMMANDS.openWith, (node) => openWithPicker(node.uri));
   register(FILE_COMMANDS.cut, (node) => clipboard.set(node.uri, true));
@@ -69,6 +79,59 @@ export function registerFileCommands(
   register(FILE_COMMANDS.copyRelativePath, (node) => copyRelativePath(store, node.uri));
   register(FILE_COMMANDS.rename, (node) => rename(node.uri));
   register(FILE_COMMANDS.delete, (node) => moveToTrash(node));
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(PICK_COMPARE_BRANCH, () => pickCompareBranch(store)),
+    vscode.commands.registerCommand(OPEN_DIFF, openDiff)
+  );
+}
+
+/**
+ * Opens `uri` as a diff against its content at `baseRef` (the compare
+ * branch's merge-base). Files that don't exist at the ref diff against empty
+ * content — an all-added view. Falls back to a plain open if the Git
+ * extension can't serve the ref content.
+ */
+async function openDiff(uri: vscode.Uri, baseRef: string, branchLabel: string): Promise<void> {
+  const atBase = await gitUriAtRef(uri, baseRef);
+  if (!atBase) {
+    await vscode.commands.executeCommand('vscode.open', uri);
+    return;
+  }
+  const title = `${path.basename(uri.fsPath)} (${branchLabel} ↔ Working Tree)`;
+  await vscode.commands.executeCommand('vscode.diff', atBase, uri, title, { preview: false });
+}
+
+/** Lets the user choose which branch the Files view filter diffs against. */
+async function pickCompareBranch(store: LayoutStore): Promise<void> {
+  const root = store.activeFolderUri;
+  if (!root) {
+    vscode.window.showInformationMessage('Activate a worktree first.');
+    return;
+  }
+
+  const TYPE_A_REF = '$(edit) Type a branch or ref…';
+  const branches = await listBranchNames(vscode.Uri.parse(root));
+  let choice: string | undefined;
+
+  if (branches.length > 0) {
+    choice = await vscode.window.showQuickPick([...branches, TYPE_A_REF], {
+      placeHolder: 'Branch to compare files against (e.g. staging)',
+    });
+    if (choice === undefined) {
+      return; // cancelled
+    }
+  }
+  if (!choice || choice === TYPE_A_REF) {
+    choice = await vscode.window.showInputBox({
+      prompt: 'Branch or ref to compare against',
+      value: store.compareBranch ?? 'staging',
+    });
+  }
+
+  if (choice?.trim()) {
+    await store.setCompareBranch(choice.trim());
+  }
 }
 
 /** Prompts for a name and creates a file or folder inside `dirUri`. */
@@ -158,7 +221,7 @@ async function rename(uri: vscode.Uri): Promise<void> {
   });
 }
 
-async function moveToTrash(node: FileNode): Promise<void> {
+async function moveToTrash(node: FileEntry): Promise<void> {
   const choice = await vscode.window.showWarningMessage(
     `Move "${node.name}" to Trash?`,
     { modal: true },

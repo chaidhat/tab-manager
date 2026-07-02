@@ -24,6 +24,7 @@ export interface GroupLayoutArgument {
  */
 export type TabRef =
   | { kind: 'file'; uri: string }
+  | { kind: 'diff'; original: string; modified: string; label: string }
   | { kind: 'terminal'; name: string; cwd?: string };
 
 /** The files open in one editor pane, identified by its view column. */

@@ -1,5 +1,9 @@
+import { execFile } from 'child_process';
 import * as path from 'path';
+import { promisify } from 'util';
 import * as vscode from 'vscode';
+
+const run = promisify(execFile);
 
 /** A folder to show in the sidebar — an open workspace folder or a discovered one. */
 export interface FolderRef {
@@ -69,6 +73,43 @@ function addFolder(
     existing.folders.push(ref);
   } else {
     repos.set(repoRoot, { name: path.basename(repoRoot), folders: [ref] });
+  }
+}
+
+/**
+ * Creates a new worktree for the repo under `.claude/worktrees/<name>` — the
+ * same convention discovery scans — on a new branch of the same name. Returns
+ * the new worktree's path; throws with git's message on failure (e.g. the
+ * branch already exists).
+ */
+export async function addWorktree(repoRoot: string, name: string): Promise<string> {
+  const worktreePath = path.join(repoRoot, CLAUDE_WORKTREES_DIR, name);
+  try {
+    await run('git', ['worktree', 'add', '-b', name, worktreePath], { cwd: repoRoot });
+  } catch (error) {
+    const stderr = (error as { stderr?: string }).stderr;
+    throw new Error(stderr?.trim() || String(error));
+  }
+  return worktreePath;
+}
+
+/**
+ * Deletes a git worktree — directory and git bookkeeping — via
+ * `git worktree remove`, run from the repository root. Without `force`, git
+ * refuses when the worktree has modifications; the thrown error's message
+ * carries git's explanation.
+ */
+export async function removeWorktree(folderPath: string, force: boolean): Promise<void> {
+  const repoRoot = await repoRootOf(vscode.Uri.file(folderPath));
+  if (!repoRoot || repoRoot === folderPath) {
+    throw new Error('Not a linked git worktree — refusing to delete a main checkout.');
+  }
+  const args = ['worktree', 'remove', ...(force ? ['--force'] : []), folderPath];
+  try {
+    await run('git', args, { cwd: repoRoot });
+  } catch (error) {
+    const stderr = (error as { stderr?: string }).stderr;
+    throw new Error(stderr?.trim() || String(error));
   }
 }
 
