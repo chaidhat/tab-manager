@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
 import { COMMANDS } from './commands';
+import { prThemeIcon, resolveWorktreePr, WorktreePr } from './pr';
 import { LayoutStore } from './store';
 import { WorktreeElement } from './types';
-import { groupFoldersByRepo } from './worktrees';
+import { currentBranch, groupFoldersByRepo } from './worktrees';
 
 /** A collapsible section for one repository and its worktrees. */
 export interface RepoSection {
@@ -20,20 +21,42 @@ function isRepoSection(element: TreeElement): element is RepoSection {
 }
 
 /**
- * The "Layouts" view: a collapsible section per repository, one row per
- * worktree (workspace folder), each holding a single layout. Clicking a
- * worktree switches to its layout.
+ * The "Worktrees" view: a collapsible section per repository, one row per
+ * worktree. Clicking a worktree opens it in a new window rooted at its
+ * folder; a row whose branch (or linked number) has a PR displays the PR's
+ * title, resolved in the background via `gh`.
  */
 export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>, vscode.Disposable {
   private readonly emitter = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.emitter.event;
   private readonly subscriptions: vscode.Disposable[];
+  // folderUri -> resolved PR (null = looked up, no PR). Populated in the
+  // background so a row can show its PR title without blocking the tree; the
+  // presence of a key also stops us re-querying `gh` on every re-render.
+  private readonly prCache = new Map<string, WorktreePr | null>();
+  private readonly resolving = new Set<string>();
+  // Same background-resolution scheme as prCache, but for the repo-root row's
+  // current branch — it shows a branch name instead of a PR, and is never
+  // linkable to one.
+  private readonly branchCache = new Map<string, string | null>();
+  private readonly resolvingBranch = new Set<string>();
 
   constructor(private readonly store: LayoutStore) {
     this.subscriptions = [
       store.onDidChange(() => this.emitter.fire()),
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.emitter.fire()),
     ];
+  }
+
+  /**
+   * Re-renders the tree (e.g. after a worktree is created on disk). Drops the
+   * resolved-PR cache so rows re-query — new worktrees get looked up and any
+   * renamed PRs refresh.
+   */
+  refresh(): void {
+    this.prCache.clear();
+    this.branchCache.clear();
+    this.emitter.fire();
   }
 
   async getChildren(element?: TreeElement): Promise<TreeElement[]> {
@@ -48,7 +71,7 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
     }
 
     const openUris = new Set(folders.map((folder) => folder.uri.toString()));
-    return (await groupFoldersByRepo(folders)).map(
+    const sections = (await groupFoldersByRepo(folders)).map(
       (repo): RepoSection => ({
         id: `repo:${repo.repoRoot ?? 'non-git'}`,
         label: repo.name,
@@ -57,18 +80,76 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
           folderUri: folder.uri.toString(),
           name: folder.name,
           isOpen: openUris.has(folder.uri.toString()),
+          isRoot: repo.repoRoot !== undefined && folder.uri.fsPath === repo.repoRoot,
         })),
       })
     );
+    const worktrees = sections.flatMap((section) => section.worktrees);
+    this.syncPrTitles(worktrees.filter((worktree) => !worktree.isRoot));
+    this.syncBranches(worktrees.filter((worktree) => worktree.isRoot));
+    return sections;
+  }
+
+  /**
+   * Looks up the PR for each not-yet-resolved worktree in the background and
+   * re-renders once the batch lands, so rows flip from folder name to PR title
+   * without blocking the initial paint. Already-cached and in-flight folders
+   * are skipped, so repeated re-renders don't re-spawn `gh`.
+   */
+  private syncPrTitles(worktrees: WorktreeElement[]): void {
+    const targets = worktrees.filter(
+      (worktree) =>
+        !this.prCache.has(worktree.folderUri) && !this.resolving.has(worktree.folderUri)
+    );
+    if (targets.length === 0) {
+      return;
+    }
+    targets.forEach((worktree) => this.resolving.add(worktree.folderUri));
+
+    void Promise.all(
+      targets.map(async (worktree) => {
+        const cwd = vscode.Uri.parse(worktree.folderUri).fsPath;
+        const linked = this.store.linkedPr(worktree.folderUri);
+        const pr = await resolveWorktreePr(cwd, linked?.number);
+        this.resolving.delete(worktree.folderUri);
+        this.prCache.set(worktree.folderUri, pr ?? null);
+        return pr !== undefined;
+      })
+    ).then((found) => {
+      if (found.some(Boolean)) {
+        this.emitter.fire();
+      }
+    });
+  }
+
+  /** Same background-refresh scheme as {@link syncPrTitles}, for root rows' branch names. */
+  private syncBranches(roots: WorktreeElement[]): void {
+    const targets = roots.filter(
+      (worktree) =>
+        !this.branchCache.has(worktree.folderUri) && !this.resolvingBranch.has(worktree.folderUri)
+    );
+    if (targets.length === 0) {
+      return;
+    }
+    targets.forEach((worktree) => this.resolvingBranch.add(worktree.folderUri));
+
+    void Promise.all(
+      targets.map(async (worktree) => {
+        const cwd = vscode.Uri.parse(worktree.folderUri).fsPath;
+        const branch = await currentBranch(cwd);
+        this.resolvingBranch.delete(worktree.folderUri);
+        this.branchCache.set(worktree.folderUri, branch ?? null);
+        return branch !== undefined;
+      })
+    ).then((found) => {
+      if (found.some(Boolean)) {
+        this.emitter.fire();
+      }
+    });
   }
 
   getTreeItem(element: TreeElement): vscode.TreeItem {
     return isRepoSection(element) ? this.repoItem(element) : this.worktreeItem(element);
-  }
-
-  /** Re-renders the tree (e.g. after a worktree is created on disk). */
-  refresh(): void {
-    this.emitter.fire();
   }
 
   private repoItem(section: RepoSection): vscode.TreeItem {
@@ -80,31 +161,58 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
   }
 
   private worktreeItem(worktree: WorktreeElement): vscode.TreeItem {
-    const isActive = worktree.folderUri === this.store.activeFolderUri;
-    const hasLayout = this.store.hasLayout(worktree.folderUri);
-    // A worktree linked to a PR takes the PR's title as its display name;
-    // the folder name stays available in the tooltip.
+    // The repo's main checkout is never linked to a PR — it shows its current
+    // branch name instead (falling back to the folder name while that
+    // background lookup is in flight).
+    if (worktree.isRoot) {
+      return this.rootItem(worktree);
+    }
+
+    // A worktree with a PR takes the PR's title as its display name; the folder
+    // name stays available in the tooltip. The PR is whichever the background
+    // lookup resolved (by linked number or branch), falling back to a stored
+    // link's title while that lookup is still in flight.
+    const resolved = this.prCache.get(worktree.folderUri);
     const linked = this.store.linkedPr(worktree.folderUri);
-    const label = linked?.title ?? worktree.name;
+    const prTitle = resolved?.title ?? linked?.title;
+    const prNumber = resolved?.number ?? linked?.number;
+    const label = prTitle !== undefined ? `#${prNumber}: ${prTitle}` : worktree.name;
     const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
 
-    const hints = [!hasLayout && 'no layout', !worktree.isOpen && 'not open'].filter(
-      (hint): hint is string => Boolean(hint)
-    );
+    // A resolved PR gets a state-colored icon (open green, draft grey, merged
+    // purple, closed red); a linked-but-not-yet-resolved PR gets a neutral one.
+    if (resolved) {
+      item.iconPath = prThemeIcon(resolved.state, resolved.isDraft);
+    } else if (linked) {
+      item.iconPath = new vscode.ThemeIcon('git-pull-request');
+    }
 
     item.id = `worktree:${worktree.folderUri}`;
-    // Menu `when` clauses match these markers: hasLayout gates "Clear Saved
-    // Layout", closed (not an open workspace folder) gates "Delete Worktree".
-    item.contextValue = [
-      'worktree',
-      hasLayout ? 'hasLayout' : '',
-      worktree.isOpen ? 'open' : 'closed',
-    ]
-      .filter(Boolean)
-      .join('-');
-    item.description = isActive ? '●' : hints.join(' · ') || undefined;
-    const prNote = linked ? ` — PR #${linked.number}` : '';
-    item.tooltip = `Open "${worktree.name}" in a new window${prNote} (right-click to switch layouts in this one)`;
+    // Menu `when` clauses match these exact markers: closed (not an open
+    // workspace folder) gates "Delete Worktree"; both gate "Link to PR".
+    item.contextValue = worktree.isOpen ? 'worktree-open' : 'worktree-closed';
+    const prNote = prNumber ? ` — PR #${prNumber}` : '';
+    item.tooltip = `Open "${worktree.name}" in a new window${prNote}`;
+    item.command = {
+      command: COMMANDS.openWindow,
+      title: 'Open Worktree in New Window',
+      arguments: [worktree.folderUri],
+    };
+
+    return item;
+  }
+
+  private rootItem(worktree: WorktreeElement): vscode.TreeItem {
+    const branch = this.branchCache.get(worktree.folderUri);
+    const label = branch ?? worktree.name;
+    const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
+
+    item.id = `worktree:${worktree.folderUri}`;
+    // The `worktree-root-*` markers keep "Link to PR" and "Delete Worktree"
+    // (which match `worktree-open`/`worktree-closed` exactly) off this row,
+    // while `copyWorktreePath` (matching the `worktree` prefix) still applies.
+    item.contextValue = worktree.isOpen ? 'worktree-root-open' : 'worktree-root-closed';
+    item.tooltip = `Open "${worktree.name}" in a new window — branch "${label}"`;
     item.command = {
       command: COMMANDS.openWindow,
       title: 'Open Worktree in New Window',

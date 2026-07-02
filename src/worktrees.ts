@@ -2,6 +2,7 @@ import { execFile } from 'child_process';
 import * as path from 'path';
 import { promisify } from 'util';
 import * as vscode from 'vscode';
+import { gh, ghErrorMessage } from './ghCli';
 
 const run = promisify(execFile);
 
@@ -94,6 +95,30 @@ export async function addWorktree(repoRoot: string, name: string): Promise<strin
 }
 
 /**
+ * Creates a worktree checked out to a pull request's branch, named after the
+ * PR number under `.claude/worktrees/`. The worktree starts detached and
+ * `gh pr checkout` runs inside it — gh handles fetching, branch creation and
+ * fork remotes. A failed checkout removes the half-made worktree again.
+ */
+export async function addWorktreeForPr(repoRoot: string, prNumber: number): Promise<string> {
+  const worktreePath = path.join(repoRoot, CLAUDE_WORKTREES_DIR, String(prNumber));
+  try {
+    await run('git', ['worktree', 'add', '--detach', worktreePath], { cwd: repoRoot });
+  } catch (error) {
+    throw new Error(ghErrorMessage(error));
+  }
+  try {
+    await gh(['pr', 'checkout', String(prNumber)], worktreePath);
+  } catch (error) {
+    await run('git', ['worktree', 'remove', '--force', worktreePath], { cwd: repoRoot }).catch(
+      () => undefined
+    );
+    throw new Error(ghErrorMessage(error));
+  }
+  return worktreePath;
+}
+
+/**
  * Deletes a git worktree — directory and git bookkeeping — via
  * `git worktree remove`, run from the repository root. Without `force`, git
  * refuses when the worktree has modifications; the thrown error's message
@@ -110,6 +135,17 @@ export async function removeWorktree(folderPath: string, force: boolean): Promis
   } catch (error) {
     const stderr = (error as { stderr?: string }).stderr;
     throw new Error(stderr?.trim() || String(error));
+  }
+}
+
+/** The branch checked out at `cwd`, or undefined if that fails (e.g. detached HEAD). */
+export async function currentBranch(cwd: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await run('git', ['branch', '--show-current'], { cwd });
+    const branch = stdout.trim();
+    return branch || undefined;
+  } catch {
+    return undefined;
   }
 }
 

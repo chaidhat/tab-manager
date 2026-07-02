@@ -1,9 +1,6 @@
 import * as vscode from 'vscode';
-import { CapturedLayout } from './types';
 
-const LAYOUTS_KEY = 'tabManager.worktreeLayouts';
 const ACTIVE_KEY = 'tabManager.activeWorktree';
-const FILTER_ENABLED_KEY = 'tabManager.filesFilterEnabled';
 const FILTER_BRANCH_KEY = 'tabManager.filesFilterBranch';
 const LINKED_PRS_KEY = 'tabManager.linkedPrs';
 
@@ -14,10 +11,9 @@ export interface LinkedPr {
 }
 
 /**
- * Persists one layout per worktree (workspace folder), keyed by folder URI,
- * plus which worktree is active. Lives in workspace state because layouts
- * reference this workspace's files. Emits {@link onDidChange} whenever the
- * data changes so the tree view can refresh.
+ * Per-workspace state: which worktree this window targets (set in child
+ * worktree windows), PR links, and the diff-view compare branch. Emits
+ * {@link onDidChange} whenever the data changes so views can refresh.
  */
 export class LayoutStore implements vscode.Disposable {
   private readonly emitter = new vscode.EventEmitter<void>();
@@ -25,32 +21,19 @@ export class LayoutStore implements vscode.Disposable {
 
   constructor(private readonly memento: vscode.Memento) {}
 
-  getLayout(folderUri: string): CapturedLayout | undefined {
-    return this.layouts()[folderUri];
-  }
-
-  hasLayout(folderUri: string): boolean {
-    return folderUri in this.layouts();
-  }
-
-  /** The worktree whose slot the current arrangement is saved into on switch. */
+  /** The worktree this window's PR/files views target. */
   get activeFolderUri(): string | undefined {
     return this.memento.get<string>(ACTIVE_KEY);
   }
 
-  /** Whether the Files view shows only files changed vs {@link compareBranch}. */
-  get filesFilterEnabled(): boolean {
-    return this.memento.get<boolean>(FILTER_ENABLED_KEY, false);
+  async setActive(folderUri: string | undefined): Promise<void> {
+    await this.memento.update(ACTIVE_KEY, folderUri);
+    this.emitter.fire();
   }
 
-  /** The branch the Files view filter diffs against (e.g. "staging"). */
+  /** The branch the changed-files view diffs against (e.g. "staging"). */
   get compareBranch(): string | undefined {
     return this.memento.get<string>(FILTER_BRANCH_KEY);
-  }
-
-  async setFilesFilterEnabled(enabled: boolean): Promise<void> {
-    await this.memento.update(FILTER_ENABLED_KEY, enabled);
-    this.emitter.fire();
   }
 
   async setCompareBranch(branch: string): Promise<void> {
@@ -87,26 +70,6 @@ export class LayoutStore implements vscode.Disposable {
 
   private linkedPrs(): Record<string, number | LinkedPr> {
     return this.memento.get<Record<string, number | LinkedPr>>(LINKED_PRS_KEY, {});
-  }
-
-  async saveLayout(folderUri: string, layout: CapturedLayout): Promise<void> {
-    await this.memento.update(LAYOUTS_KEY, { ...this.layouts(), [folderUri]: layout });
-    this.emitter.fire();
-  }
-
-  async clearLayout(folderUri: string): Promise<void> {
-    const { [folderUri]: _removed, ...rest } = this.layouts();
-    await this.memento.update(LAYOUTS_KEY, rest);
-    this.emitter.fire();
-  }
-
-  async setActive(folderUri: string | undefined): Promise<void> {
-    await this.memento.update(ACTIVE_KEY, folderUri);
-    this.emitter.fire();
-  }
-
-  private layouts(): Record<string, CapturedLayout> {
-    return this.memento.get<Record<string, CapturedLayout>>(LAYOUTS_KEY, {});
   }
 
   dispose(): void {

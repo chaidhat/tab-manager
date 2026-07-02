@@ -1,156 +1,63 @@
 import * as vscode from 'vscode';
-import {
-  applyLayout,
-  captureCurrentLayout,
-  clearEditorArea,
-  describeLayout,
-  owningFolderUri,
-} from './layout';
 import { log } from './log';
-import { hidePanelOnSwitch } from './settings';
+import { listOpenPrs } from './pr';
 import { LayoutStore } from './store';
-import { TerminalManager } from './terminals';
 import type { RepoSection } from './tree';
 import { WorktreeElement } from './types';
-import { addWorktree, removeWorktree } from './worktrees';
+import { addWorktree, addWorktreeForPr, removeWorktree } from './worktrees';
 
 /** Command ids, mirrored in `package.json` under `contributes.commands`. */
 export const COMMANDS = {
-  save: 'tabManager.saveLayout',
-  apply: 'tabManager.applyLayout',
-  clear: 'tabManager.clearLayout',
-  deleteWorktree: 'tabManager.deleteWorktree',
+  openWindow: 'tabManager.openWorktreeWindow',
   copyPath: 'tabManager.copyWorktreePath',
   newWorktree: 'tabManager.newWorktree',
-  openWindow: 'tabManager.openWorktreeWindow',
+  deleteWorktree: 'tabManager.deleteWorktree',
 } as const;
 
 export function registerCommands(
   context: vscode.ExtensionContext,
   store: LayoutStore,
-  terminals: TerminalManager,
   refreshWorktrees: () => void
 ): void {
   const register = (id: string, handler: (...args: any[]) => unknown) =>
     context.subscriptions.push(vscode.commands.registerCommand(id, handler));
 
-  // Switches are serialized with latest-wins coalescing: a click during an
-  // in-flight switch queues its target (replacing any earlier queued one)
-  // instead of overlapping two teardown/restore choreographies.
-  let queuedTarget: string | undefined;
-  let switching = false;
-  const requestSwitch = async (folderUri: string): Promise<void> => {
-    queuedTarget = folderUri;
-    if (switching) {
-      return;
-    }
-    switching = true;
-    try {
-      while (queuedTarget !== undefined) {
-        const target = queuedTarget;
-        queuedTarget = undefined;
-        await switchToWorktree(store, terminals, target);
-      }
-    } finally {
-      switching = false;
-    }
-  };
-
-  register(COMMANDS.save, () => saveCurrentArrangement(store));
-  // Bound from row clicks with a string, and from the context menu with the
-  // tree element — accept both.
-  register(COMMANDS.apply, (target: string | WorktreeElement) =>
-    requestSwitch(typeof target === 'string' ? target : target.folderUri)
-  );
   register(COMMANDS.openWindow, (folderUri: string) => {
     log(`open window: ${folderName(folderUri)}`);
     return vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.parse(folderUri), {
       forceNewWindow: true,
     });
   });
-  register(COMMANDS.clear, (worktree: WorktreeElement) => clearWorktreeLayout(store, worktree));
-  register(COMMANDS.deleteWorktree, (worktree: WorktreeElement) =>
-    deleteWorktree(store, worktree)
-  );
   register(COMMANDS.copyPath, (worktree: WorktreeElement) =>
     vscode.env.clipboard.writeText(vscode.Uri.parse(worktree.folderUri).fsPath)
   );
   register(COMMANDS.newWorktree, (section: RepoSection) =>
-    newWorktree(section, refreshWorktrees)
+    newWorktree(store, section, refreshWorktrees)
+  );
+  register(COMMANDS.deleteWorktree, (worktree: WorktreeElement) =>
+    deleteWorktree(store, worktree, refreshWorktrees)
   );
 }
 
-/**
- * Saves the current arrangement into the active worktree's slot. With no
- * active worktree yet, the owning worktree is inferred from the open files.
- */
-async function saveCurrentArrangement(store: LayoutStore): Promise<void> {
-  const captured = await captureCurrentLayout();
-  const target = store.activeFolderUri ?? owningFolderUri(captured);
-  if (!target) {
-    vscode.window.showInformationMessage(
-      'Open a file from one of the worktrees (or click a worktree in the list) first.'
-    );
-    return;
-  }
-
-  await store.saveLayout(target, captured);
-  if (store.activeFolderUri !== target) {
-    await store.setActive(target);
-  }
-  vscode.window.showInformationMessage(`Saved layout for "${folderName(target)}".`);
-}
-
-/**
- * The core "auto-save & swap": saves the current arrangement into the worktree
- * you're leaving, then loads the clicked worktree's layout. A worktree without
- * a saved layout starts blank (no panes) rather than keeping whatever was open
- * before — arrange it and switch away to save a layout for it.
- */
-async function switchToWorktree(
+/** The repo row's "+": choose between a fresh worktree and one from a PR. */
+async function newWorktree(
   store: LayoutStore,
-  terminals: TerminalManager,
-  folderUri: string
+  section: RepoSection,
+  refreshWorktrees: () => void
 ): Promise<void> {
-  if (store.activeFolderUri === folderUri) {
+  const repoRoot = section.repoRoot;
+  if (!repoRoot) {
     return;
   }
-
-  const captured = await captureCurrentLayout();
-  // No active worktree yet (first use): file the arrangement under the
-  // worktree its files belong to, so it isn't lost when the target applies.
-  const previous = store.activeFolderUri ?? owningFolderUri(captured);
-  log(`switch → ${folderName(folderUri)}: saving ${previous ? folderName(previous) : '(none)'} ← ${describeLayout(captured)}`);
-  if (previous === folderUri) {
-    // Activating the worktree that owns the current files adopts the
-    // arrangement as its layout — clearing to blank here would destroy it.
-    await store.saveLayout(folderUri, captured);
-    await store.setActive(folderUri);
-    return;
-  }
-  if (previous) {
-    await store.saveLayout(previous, captured);
-  }
-
-  await store.setActive(folderUri);
-  const saved = store.getLayout(folderUri);
-  log(
-    saved
-      ? `switch → ${folderName(folderUri)}: applying ${describeLayout(saved)}`
-      : `switch → ${folderName(folderUri)}: no saved layout, going blank`
-  );
-  if (saved) {
-    const result = await applyLayout(saved, terminals, {
-      outgoingFolderUri: previous,
-      targetFolderUri: folderUri,
-      hidePanelAfter: hidePanelOnSwitch(),
-    });
-    warnIfMissing(result.missing);
-  } else {
-    await clearEditorArea(terminals, {
-      outgoingFolderUri: previous,
-      hidePanelAfter: hidePanelOnSwitch(),
-    });
+  const CREATE_NEW = 'Create New Worktree…';
+  const FROM_PR = 'Create From PR…';
+  const mode = await vscode.window.showQuickPick([CREATE_NEW, FROM_PR], {
+    placeHolder: `Add a worktree to ${section.label}`,
+  });
+  if (mode === CREATE_NEW) {
+    await createNewWorktree({ ...section, repoRoot }, refreshWorktrees);
+  } else if (mode === FROM_PR) {
+    await createWorktreeFromPr(store, { ...section, repoRoot }, refreshWorktrees);
   }
 }
 
@@ -158,10 +65,10 @@ async function switchToWorktree(
  * Creates a worktree for the repo under `.claude/worktrees/<name>`, on a new
  * branch of the same name, and refreshes the sidebar so it appears.
  */
-async function newWorktree(section: RepoSection, refreshWorktrees: () => void): Promise<void> {
-  if (!section.repoRoot) {
-    return;
-  }
+async function createNewWorktree(
+  section: RepoSection & { repoRoot: string },
+  refreshWorktrees: () => void
+): Promise<void> {
   const name = await vscode.window.showInputBox({
     prompt: `New worktree for ${section.label} (also the branch name)`,
     placeHolder: 'my-feature',
@@ -182,12 +89,63 @@ async function newWorktree(section: RepoSection, refreshWorktrees: () => void): 
 }
 
 /**
+ * Picks (searchably) one of the repo's open PRs, creates a worktree named
+ * after its number with the PR's branch checked out, and links it to the PR
+ * so its row shows the PR title.
+ */
+async function createWorktreeFromPr(
+  store: LayoutStore,
+  section: RepoSection & { repoRoot: string },
+  refreshWorktrees: () => void
+): Promise<void> {
+  const prs = await listOpenPrs(section.repoRoot);
+  if (prs.length === 0) {
+    vscode.window.showInformationMessage(
+      `No open pull requests found for ${section.label} (is the GitHub CLI signed in?).`
+    );
+    return;
+  }
+
+  const pick = await vscode.window.showQuickPick(
+    prs.map((pr) => ({ label: `#${pr.number} ${pr.title}`, description: pr.headRefName, pr })),
+    { placeHolder: 'Search a pull request…', matchOnDescription: true }
+  );
+  if (!pick) {
+    return;
+  }
+
+  try {
+    const worktreePath = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `Creating worktree for #${pick.pr.number}…`,
+      },
+      () => addWorktreeForPr(section.repoRoot, pick.pr.number)
+    );
+    await store.setLinkedPr(vscode.Uri.file(worktreePath).toString(), {
+      number: pick.pr.number,
+      title: pick.pr.title,
+    });
+    refreshWorktrees();
+    vscode.window.showInformationMessage(
+      `Created worktree "${pick.pr.number}" with PR #${pick.pr.number} checked out.`
+    );
+  } catch (error) {
+    vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+  }
+}
+
+/**
  * Deletes the git worktree itself — directory and all. Modal-confirmed; a
  * dirty worktree gets a second, explicit force confirmation quoting git's
  * refusal. Open workspace folders never get this action (menu-gated), since
  * deleting a folder out from under the workspace breaks it.
  */
-async function deleteWorktree(store: LayoutStore, worktree: WorktreeElement): Promise<void> {
+async function deleteWorktree(
+  store: LayoutStore,
+  worktree: WorktreeElement,
+  refreshWorktrees: () => void
+): Promise<void> {
   if (worktree.isOpen) {
     vscode.window.showWarningMessage(
       'This worktree is open in the workspace — remove it from the workspace first.'
@@ -226,22 +184,9 @@ async function deleteWorktree(store: LayoutStore, worktree: WorktreeElement): Pr
     }
   }
 
-  await store.clearLayout(worktree.folderUri);
-  if (store.activeFolderUri === worktree.folderUri) {
-    await store.setActive(undefined);
-  }
+  await store.setLinkedPr(worktree.folderUri, undefined);
+  refreshWorktrees();
   vscode.window.showInformationMessage(`Deleted worktree "${worktree.name}".`);
-}
-
-async function clearWorktreeLayout(store: LayoutStore, worktree: WorktreeElement): Promise<void> {
-  const choice = await vscode.window.showWarningMessage(
-    `Clear the saved layout for "${worktree.name}"?`,
-    { modal: true },
-    'Clear'
-  );
-  if (choice === 'Clear') {
-    await store.clearLayout(worktree.folderUri);
-  }
 }
 
 export function folderName(folderUri: string): string {
@@ -250,14 +195,4 @@ export function folderName(folderUri: string): string {
   // Falls back to the path's last segment for a discovered worktree that
   // isn't an open workspace folder.
   return folder?.name ?? uri.path.split('/').filter(Boolean).pop() ?? folderUri;
-}
-
-function warnIfMissing(missing: string[]): void {
-  if (missing.length === 0) {
-    return;
-  }
-  const names = missing.map((uri) => vscode.Uri.parse(uri).path.split('/').pop()).join(', ');
-  vscode.window.showWarningMessage(
-    `Some files couldn't be reopened (they may have been moved or deleted): ${names}`
-  );
 }

@@ -4,20 +4,16 @@ import { registerFileCommands } from './fileCommands';
 import { FilesTreeProvider } from './filesTree';
 import { registerPrView } from './pr';
 import { LayoutStore } from './store';
-import { TerminalManager } from './terminals';
 import { LayoutTreeProvider } from './tree';
 import { isChildWorktreeWindow } from './worktrees';
 
 export function activate(context: vscode.ExtensionContext): void {
   const store = new LayoutStore(context.workspaceState);
-  const terminals = new TerminalManager(context.globalStorageUri);
+  const worktreesProvider = new LayoutTreeProvider(store);
+  const changedFilesProvider = new FilesTreeProvider(store);
 
-  const layoutsProvider = new LayoutTreeProvider(store);
-  // The child-worktree container's Files view: diff mode locked on.
-  const changedFilesProvider = new FilesTreeProvider(store, true);
-
-  // A window opened at a linked worktree gets the dedicated container (the
-  // regular one hides); its views target the (single) workspace folder.
+  // A window opened at a `.claude/worktrees/<name>` folder gets the dedicated
+  // Worktree container (the hub one hides); its views target that folder.
   void isChildWorktreeWindow().then(async (isChild) => {
     await vscode.commands.executeCommand('setContext', 'tabManager.isChildWorktree', isChild);
     const folder = vscode.workspace.workspaceFolders?.[0];
@@ -25,15 +21,16 @@ export function activate(context: vscode.ExtensionContext): void {
       await store.setActive(folder.uri.toString());
     }
   });
+
   context.subscriptions.push(
     store,
-    layoutsProvider,
+    worktreesProvider,
     changedFilesProvider,
     vscode.window.registerTreeDataProvider('tab-manager.worktreeFiles', changedFilesProvider),
-    vscode.window.registerTreeDataProvider('tab-manager.layouts', layoutsProvider)
+    vscode.window.registerTreeDataProvider('tab-manager.layouts', worktreesProvider)
   );
 
-  registerCommands(context, store, terminals, () => layoutsProvider.refresh());
+  registerCommands(context, store, () => worktreesProvider.refresh());
   registerFileCommands(context, store);
   registerPrView(context, store);
 }

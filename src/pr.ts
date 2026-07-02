@@ -1,17 +1,13 @@
 import { execFile } from 'child_process';
+import * as path from 'path';
 import { promisify } from 'util';
 import * as vscode from 'vscode';
+import { gh, ghErrorMessage } from './ghCli';
 import { log } from './log';
 import { LayoutStore } from './store';
 import { WorktreeElement } from './types';
 
 const run = promisify(execFile);
-
-/**
- * macOS GUI apps don't inherit a shell PATH, so `gh` (Homebrew) is often not
- * findable by name from the extension host — try well-known locations too.
- */
-const GH_CANDIDATES = ['gh', '/opt/homebrew/bin/gh', '/usr/local/bin/gh'];
 
 const PR_COMMANDS = {
   refresh: 'tabManager.refreshPr',
@@ -29,6 +25,36 @@ interface PrInfo {
 }
 
 type PrLookup = { kind: 'pr'; pr: PrInfo } | { kind: 'none' } | { kind: 'no-gh' };
+
+/** The four states a PR renders as, folding `isDraft` into `state`. */
+export type PrVisualState = 'open' | 'draft' | 'merged' | 'closed';
+
+/** Collapses gh's `state` + `isDraft` into a single presentation state. */
+export function prVisualState(state: string, isDraft: boolean): PrVisualState {
+  const normalized = state.toUpperCase();
+  if (normalized === 'MERGED') {
+    return 'merged';
+  }
+  if (normalized === 'CLOSED') {
+    return 'closed';
+  }
+  return isDraft ? 'draft' : 'open';
+}
+
+// Codicon id + ThemeColor per state, matching GitHub's palette: open green,
+// draft grey, merged purple, closed red. Used for the Worktrees tree rows.
+const PR_TREE_ICON: Record<PrVisualState, { codicon: string; color: string }> = {
+  open: { codicon: 'git-pull-request', color: 'charts.green' },
+  draft: { codicon: 'git-pull-request-draft', color: 'descriptionForeground' },
+  merged: { codicon: 'git-merge', color: 'charts.purple' },
+  closed: { codicon: 'git-pull-request-closed', color: 'charts.red' },
+};
+
+/** A colored PR-state icon for a tree row. */
+export function prThemeIcon(state: string, isDraft: boolean): vscode.ThemeIcon {
+  const { codicon, color } = PR_TREE_ICON[prVisualState(state, isDraft)];
+  return new vscode.ThemeIcon(codicon, new vscode.ThemeColor(color));
+}
 
 /** What the webview currently shows, kept for resolving button messages. */
 interface PrViewState {
@@ -168,6 +194,16 @@ class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable
           void vscode.commands.executeCommand('vscode.open', vscode.Uri.parse(state.createUrl));
         }
         break;
+      case 'link': {
+        const worktree: WorktreeElement = {
+          folderUri: state.folderUri,
+          name: path.basename(state.cwd),
+          isOpen: true,
+          isRoot: false,
+        };
+        void vscode.commands.executeCommand(PR_COMMANDS.link, worktree);
+        break;
+      }
     }
   }
 
@@ -175,6 +211,25 @@ class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable
     this.subscription.dispose();
   }
 }
+
+// GitHub octicons (16px), colored to match the tree icons via VS Code's chart
+// CSS variables so the badge tracks the active theme.
+const SVG_OPEN =
+  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z"/></svg>';
+const SVG_DRAFT =
+  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.25 1A2.25 2.25 0 0 1 4 5.372v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.251 2.251 0 0 1 3.25 1Zm9.5 14a2.25 2.25 0 1 1 0-4.5 2.25 2.25 0 0 1 0 4.5ZM2.5 3.25a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0ZM3.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm9.5 0a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM14 7.5a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0ZM12.75 3a1.25 1.25 0 1 1 0 2.5 1.25 1.25 0 0 1 0-2.5Z"/></svg>';
+const SVG_MERGED =
+  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.45 5.154A4.25 4.25 0 0 0 9.25 7.5h1.378a2.251 2.251 0 1 1 0 1.5H9.25A5.734 5.734 0 0 1 5 7.123v3.505a2.25 2.25 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.95-.218ZM4.25 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm8.5-4.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z"/></svg>';
+const SVG_CLOSED =
+  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.25 1A2.25 2.25 0 0 1 4 5.372v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.251 2.251 0 0 1 3.25 1Zm9.5 5.5a.75.75 0 0 1 .75.75v3.378a2.251 2.251 0 1 1-1.5 0V7.25a.75.75 0 0 1 .75-.75Zm-2.03-5.273a.75.75 0 0 1 1.06 0l.97.97.97-.97a.749.749 0 0 1 1.275.326.749.749 0 0 1-.215.734l-.97.97.97.97a.751.751 0 0 1-.018 1.042.751.751 0 0 1-1.042.018l-.97-.97-.97.97a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734l.97-.97-.97-.97a.75.75 0 0 1 0-1.06ZM2.5 3.25a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0ZM3.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm9.5 0a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z"/></svg>';
+
+/** Icon, label, and color per PR state for the webview badge. */
+const PR_WEB_BADGE: Record<PrVisualState, { label: string; color: string; svg: string }> = {
+  open: { label: 'Open', color: 'var(--vscode-charts-green)', svg: SVG_OPEN },
+  draft: { label: 'Draft', color: 'var(--vscode-descriptionForeground)', svg: SVG_DRAFT },
+  merged: { label: 'Merged', color: 'var(--vscode-charts-purple)', svg: SVG_MERGED },
+  closed: { label: 'Closed', color: 'var(--vscode-charts-red)', svg: SVG_CLOSED },
+};
 
 function renderHtml(state: PrViewState | undefined): string {
   let content: string;
@@ -186,13 +241,21 @@ function renderHtml(state: PrViewState | undefined): string {
     const create = state.createUrl
       ? `<button data-cmd="create">Create PR on GitHub…</button>`
       : '';
-    content = `<p class="muted">No pull request — right-click a worktree to link one.</p>${create}`;
+    content = `
+      <p class="muted">No pull request for this worktree yet.</p>
+      <div class="actions">
+        <button data-cmd="link">Link to PR…</button>
+        ${create}
+      </div>`;
   } else {
     const pr = state.lookup.pr;
-    const badge = pr.isDraft ? `${pr.state} · draft` : pr.state;
+    const badge = PR_WEB_BADGE[prVisualState(pr.state, pr.isDraft)];
     content = `
       <div class="title">${escapeHtml(pr.title)}</div>
-      <div class="meta">#${pr.number} · ${escapeHtml(badge)}</div>
+      <div class="meta">
+        <span class="state" style="color: ${badge.color}">${badge.svg}${badge.label}</span>
+        <span class="num">#${pr.number}</span>
+      </div>
       <div class="actions">
         <button data-cmd="open">Open on GitHub</button>
         <button data-cmd="rename">Rename…</button>
@@ -205,7 +268,10 @@ function renderHtml(state: PrViewState | undefined): string {
 <head><style>
   body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 8px 12px; }
   .title { font-size: 1.35em; font-weight: 600; line-height: 1.35; word-wrap: break-word; }
-  .meta { margin-top: 4px; opacity: 0.75; }
+  .meta { margin-top: 6px; display: flex; align-items: center; gap: 8px; }
+  .state { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; }
+  .state svg { width: 14px; height: 14px; fill: currentColor; }
+  .num { opacity: 0.75; }
   .muted { opacity: 0.75; }
   .actions { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
   button {
@@ -236,24 +302,73 @@ function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;');
 }
 
-/** Right-click "Link with PR…": pick from open PRs, type a number, or unlink. */
-async function linkPr(store: LayoutStore, worktree: WorktreeElement): Promise<void> {
-  const cwd = vscode.Uri.parse(worktree.folderUri).fsPath;
-  const current = store.linkedPr(worktree.folderUri);
+/** A worktree's resolved PR, just enough to label and color its row. */
+export interface WorktreePr {
+  number: number;
+  title: string;
+  state: string;
+  isDraft: boolean;
+}
 
-  const ENTER_NUMBER = '$(edit) Enter a PR number…';
-  const UNLINK = `$(x) Unlink PR #${current?.number}`;
-  let picks: vscode.QuickPickItem[] = [];
+/**
+ * The pull request for a worktree, for the Worktrees list: its linked PR by
+ * number if one is set, otherwise the PR for the folder's current branch.
+ * Returns undefined when there's no PR (or `gh` fails); failures are logged,
+ * not surfaced, since this runs speculatively for every worktree row.
+ */
+export async function resolveWorktreePr(
+  cwd: string,
+  linkedNumber: number | undefined
+): Promise<WorktreePr | undefined> {
+  try {
+    const selector = linkedNumber !== undefined ? [String(linkedNumber)] : [];
+    const stdout = await gh(
+      ['pr', 'view', ...selector, '--json', 'number,title,state,isDraft'],
+      cwd
+    );
+    const pr = JSON.parse(stdout) as WorktreePr;
+    return { number: pr.number, title: pr.title, state: pr.state, isDraft: pr.isDraft };
+  } catch (error) {
+    log(`tree: pr lookup failed for ${cwd}: ${ghErrorMessage(error)}`);
+    return undefined;
+  }
+}
+
+/** The repo's open PRs, for pickers. Empty on any failure (logged). */
+export interface OpenPr {
+  number: number;
+  title: string;
+  headRefName: string;
+}
+
+export async function listOpenPrs(cwd: string): Promise<OpenPr[]> {
   try {
     const stdout = await gh(
       ['pr', 'list', '--json', 'number,title,headRefName', '--limit', '100'],
       cwd
     );
-    const prs = JSON.parse(stdout) as { number: number; title: string; headRefName: string }[];
-    picks = prs.map((pr) => ({ label: `#${pr.number} ${pr.title}`, description: pr.headRefName }));
+    return JSON.parse(stdout) as OpenPr[];
   } catch (error) {
-    log(`pr: listing PRs failed: ${String(error)}`);
+    log(`pr: listing PRs failed: ${ghErrorMessage(error)}`);
+    return [];
   }
+}
+
+/** Right-click "Link with PR…": pick from open PRs, type a number, or unlink. */
+async function linkPr(store: LayoutStore, worktree: WorktreeElement): Promise<void> {
+  if (worktree.isRoot) {
+    vscode.window.showWarningMessage('The repo\'s main checkout can\'t be linked to a PR.');
+    return;
+  }
+  const cwd = vscode.Uri.parse(worktree.folderUri).fsPath;
+  const current = store.linkedPr(worktree.folderUri);
+
+  const ENTER_NUMBER = '$(edit) Enter a PR number…';
+  const UNLINK = `$(x) Unlink PR #${current?.number}`;
+  const picks: vscode.QuickPickItem[] = (await listOpenPrs(cwd)).map((pr) => ({
+    label: `#${pr.number} ${pr.title}`,
+    description: pr.headRefName,
+  }));
   const extras: vscode.QuickPickItem[] = [{ label: ENTER_NUMBER }];
   if (current !== undefined) {
     extras.push({ label: UNLINK });
@@ -405,24 +520,3 @@ function openUrlCommand(url: string): vscode.Command {
   return { command: 'vscode.open', title: 'Open on GitHub', arguments: [vscode.Uri.parse(url)] };
 }
 
-async function gh(args: string[], cwd: string): Promise<string> {
-  let lastError: unknown;
-  for (const bin of GH_CANDIDATES) {
-    try {
-      const { stdout } = await run(bin, args, { cwd });
-      return stdout;
-    } catch (error) {
-      lastError = error;
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        continue; // try the next location
-      }
-      throw error;
-    }
-  }
-  throw lastError;
-}
-
-function ghErrorMessage(error: unknown): string {
-  const stderr = (error as { stderr?: string }).stderr;
-  return stderr?.trim() || (error instanceof Error ? error.message : String(error));
-}
