@@ -1,4 +1,6 @@
+import { execFile } from 'child_process';
 import * as path from 'path';
+import { promisify } from 'util';
 import * as vscode from 'vscode';
 import { OPEN_DIFF, PICK_COMPARE_BRANCH } from './fileCommands';
 import { FileEntry, listDirectory } from './files';
@@ -47,8 +49,17 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
   private changedDirs: Set<string> | undefined;
   private compareBase: string | undefined;
   private warnedFilterKey: string | undefined;
+  private detectedDefault: { root: string; branch: string | undefined } | undefined;
 
-  constructor(private readonly store: LayoutStore) {
+  /**
+   * @param forceDiffMode Locks the changed-files filter ON (no checkbox row)
+   * — used by the child-worktree "Changed Files" view. With no branch picked,
+   * the compare base falls back to the repo's default branch (origin/HEAD).
+   */
+  constructor(
+    private readonly store: LayoutStore,
+    private readonly forceDiffMode = false
+  ) {
     this.subscription = store.onDidChange(() => this.onStoreChange());
     this.applyStoreState();
   }
@@ -65,6 +76,10 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
     }
     this.applyStoreState();
     this.emitter.fire();
+  }
+
+  private filterOn(): boolean {
+    return this.forceDiffMode || this.store.filesFilterEnabled;
   }
 
   private signature(): string {
@@ -113,7 +128,7 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
   private async subscribeToRepository(root: vscode.Uri | undefined): Promise<void> {
     this.repoSubscription?.dispose();
     this.repoSubscription = undefined;
-    if (!root || !this.store.filesFilterEnabled) {
+    if (!root || !this.filterOn()) {
       return;
     }
     this.repoSubscription = await onRepositoryStateChanged(root, () => {
@@ -134,15 +149,16 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
     if (!root) {
       return [];
     }
-    if (this.store.filesFilterEnabled) {
+    if (this.filterOn()) {
       await this.recomputeChangedSet(root);
     }
-    return [FILTER_ROW, ...(await this.listChildren(root))];
+    const filterRow = this.forceDiffMode ? [] : [FILTER_ROW];
+    return [...filterRow, ...(await this.listChildren(root))];
   }
 
   private async listChildren(dirUri: vscode.Uri): Promise<FileEntry[]> {
     const entries = await listDirectory(dirUri);
-    if (!this.store.filesFilterEnabled || !this.changedFiles || !this.changedDirs) {
+    if (!this.filterOn() || !this.changedFiles || !this.changedDirs) {
       return entries;
     }
     return entries.filter((entry) =>
@@ -157,7 +173,7 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
     this.changedFiles = undefined;
     this.changedDirs = undefined;
     this.compareBase = undefined;
-    const branch = this.store.compareBranch;
+    const branch = this.store.compareBranch ?? (await this.defaultBranch(root));
     if (!branch) {
       return;
     }
@@ -191,6 +207,25 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
           'Check that the branch exists (click the filter row to pick another).'
       );
     }
+  }
+
+  /** The repo's default branch (origin/HEAD), detected once per root. */
+  private async defaultBranch(root: vscode.Uri): Promise<string | undefined> {
+    if (this.detectedDefault?.root !== root.toString()) {
+      let branch: string | undefined;
+      try {
+        const { stdout } = await promisify(execFile)(
+          'git',
+          ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
+          { cwd: root.fsPath }
+        );
+        branch = stdout.trim() || undefined;
+      } catch {
+        branch = 'origin/main'; // origin/HEAD is often unset locally
+      }
+      this.detectedDefault = { root: root.toString(), branch };
+    }
+    return this.detectedDefault.branch;
   }
 
   private rootUri(): vscode.Uri | undefined {
@@ -234,9 +269,9 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
     if (!node.isDirectory) {
       // In diff mode (filter on), a changed file opens as a diff against the
       // compare base; otherwise it opens normally.
-      const branch = this.store.compareBranch;
+      const branch = this.store.compareBranch ?? this.detectedDefault?.branch;
       const asDiff =
-        this.store.filesFilterEnabled &&
+        this.filterOn() &&
         this.compareBase !== undefined &&
         branch !== undefined &&
         this.changedFiles?.has(node.uri.fsPath);

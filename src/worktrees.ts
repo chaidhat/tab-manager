@@ -114,12 +114,32 @@ export async function removeWorktree(folderPath: string, force: boolean): Promis
 }
 
 /**
+ * Whether this window's workspace is a single child worktree — strictly the
+ * `<repo>/.claude/worktrees/<name>` convention. A folder without `../worktrees`
+ * and `../../.claude` above it is treated as a root window even when it is a
+ * linked git worktree (e.g. worktrees managed by other tooling elsewhere).
+ */
+export async function isChildWorktreeWindow(): Promise<boolean> {
+  const folders = vscode.workspace.workspaceFolders;
+  if (folders?.length !== 1) {
+    return false;
+  }
+  const folderPath = folders[0].uri.fsPath;
+  const parent = path.dirname(folderPath);
+  if (path.basename(parent) !== 'worktrees' || path.basename(path.dirname(parent)) !== '.claude') {
+    return false;
+  }
+  const root = await repoRootOf(folders[0].uri);
+  return root !== undefined && root !== folderPath;
+}
+
+/**
  * Resolves the repository root a folder belongs to. A checkout's `.git` is a
  * directory at the repo root; a linked worktree's `.git` is a file containing
  * `gitdir: <repo>/.git/worktrees/<name>`, which we follow back to the repo.
  * Returns undefined for folders that aren't inside a git checkout.
  */
-async function repoRootOf(folderUri: vscode.Uri): Promise<string | undefined> {
+export async function repoRootOf(folderUri: vscode.Uri): Promise<string | undefined> {
   const dotGit = vscode.Uri.joinPath(folderUri, '.git');
   let stat: vscode.FileStat;
   try {

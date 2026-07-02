@@ -1,8 +1,9 @@
 # Tab Manager
 
-One editor **layout per worktree**. The **Tab Manager** activity bar icon opens
-two sections — **Layouts** and **Files** — each its own native collapsible view,
-the same way the built-in Explorer stacks Outline/Timeline/Dependencies.
+One editor **layout per worktree**. In a parent/hub window, the **Tab Manager**
+activity bar icon holds a single **Layouts** section; windows opened at a child
+worktree get a dedicated **Worktree** icon with a Pull Request view and a
+changed-files view instead (see below).
 
 ```
 ▾ LAYOUTS
@@ -11,15 +12,13 @@ the same way the built-in Explorer stacks Outline/Timeline/Dependencies.
       velvety
   ▾ other-repo
       main           no layout
-▾ FILES                trenton     ← files of the active worktree only
-    src
-    package.json
 ```
 
-Clicking a worktree in **Layouts** restores its layout — how the editor was
-split into panes and what was open in each pane (files and editor-area
-terminals). Arrange freely, click another worktree, and your arrangement is
-saved back to the worktree you were on.
+**Clicking a worktree opens it in a new VS Code window rooted at its folder.**
+To swap arrangements inside the current window instead, right-click →
+**Switch to Worktree Layout**: it restores how the editor was split into panes
+and what was open in each pane (files and editor-area terminals), auto-saving
+your current arrangement back to the worktree you were on.
 
 ## Usage
 
@@ -58,9 +57,10 @@ PR from there.
 
 Right-click a worktree in **Layouts** → **Link with PR...** to associate it
 with a pull request (pick from the repo's open PRs, or type a number; the same
-menu unlinks). The **Pull Request** view shows the active worktree's PR — the
+menu unlinks); the row then displays the PR's title. The **Pull Request**
+view — shown in child worktree windows — displays that worktree's PR (the
 linked one, or failing that the current branch's, looked up with the GitHub
-CLI (`gh`) — and is an editing surface:
+CLI `gh`) with a large title and is an editing surface:
 
 - **Rename PR...** — change the title in an input box.
 - **Edit description...** — opens the PR body as a markdown file; every save
@@ -81,48 +81,16 @@ window reload terminals reopen as fresh shells.
 
 Layouts are stored per-workspace (they reference this workspace's files).
 
-## Files
+## Child worktree windows
 
-The **Files** view shows only the active worktree's file tree — unlike the
-built-in Explorer, which shows every open worktree at once with no way to scope
-it to one (VS Code has no such filter). Its header names the active worktree;
-until you've clicked one in **Layouts**, it shows a prompt to do so. Click a
-file to open it; folders expand in place. Rows are colored by the built-in Git
-extension: green for additions, orange for modifications, dimmed for gitignored
-files — the same colors and logic VS Code already uses elsewhere, so nothing
-here is hand-rolled or can drift from your actual git status. The one
-trade-off: getting that coloring requires each row to carry a `resourceUri`,
-and VS Code always pairs that with a small file-type icon — there's no
-supported way to get colored text without it (a
-[longstanding open VS Code limitation](https://github.com/microsoft/vscode/issues/54281)).
-
-A checkbox row at the top — **Only files changed vs \<branch\>** — filters the
-tree down to files that differ from a branch of your choice (what a PR against
-it would contain: committed changes since the merge-base, plus uncommitted and
-untracked files). Folders show only while they contain changed files. Click
-the row's label to pick the branch (e.g. `staging`); the choice is remembered
-per workspace, and the list refreshes as you edit, stage, or commit.
-
-While the filter is on, clicking a file opens it as a **diff** against the
-compare branch's merge-base (files that didn't exist there diff against empty
-content — an all-added view). With the filter off, clicking opens the file
-normally.
-
-Right-clicking gives the usual Explorer-style menu. On a folder: New File...,
-New Folder..., Reveal in Finder, Cut, Copy, Paste, Copy Path, Copy Relative
-Path, Rename..., Delete. On a file: Open to the Side, Open With..., Reveal in
-Finder, plus the same clipboard/path/rename/delete actions. Delete moves to
-the Trash; Copy Relative Path is relative to the active worktree's root;
-pasting over an existing name creates "name copy" like the Explorer does.
-
-A worktree living under a gitignored path (e.g. `.claude/worktrees/<name>`,
-gitignored in the parent repo) would otherwise have every one of its files
-shown as ignored — the Git extension's own auto-detection skips scanning
-inside ignored directories ([microsoft/vscode#41565](https://github.com/microsoft/vscode/issues/41565)),
-so it never learns the worktree is its own repository. Whenever a worktree
-becomes active, this extension explicitly asks the Git extension to open it as
-its own repository, so ignore/modified status is computed against *its own*
-root and `.gitignore`, not the parent's.
+A window opened at a linked worktree (e.g. via clicking a worktree row, which
+opens `.claude/worktrees/<name>` in its own window) shows a dedicated
+**Worktree** activity-bar icon instead of the regular Tab Manager one. Its
+container holds just two sections: the worktree's **Pull Request** (same
+rename/edit-description tooling) and **Changed Files** — the file tree with
+the diff filter locked on, comparing against your picked branch or, failing
+that, the repo's default branch (`origin/HEAD`); the title-bar branch button
+changes the base. Parent/hub windows keep the regular container.
 
 ## Run
 

@@ -104,12 +104,10 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
       .join('-');
     item.description = isActive ? '●' : hints.join(' · ') || undefined;
     const prNote = linked ? ` — PR #${linked.number}` : '';
-    item.tooltip = worktree.isOpen
-      ? `Switch to the "${worktree.name}" layout${prNote}`
-      : `Switch to the "${worktree.name}" layout${prNote} (opens its files without adding it to the workspace)`;
+    item.tooltip = `Open "${worktree.name}" in a new window${prNote} (right-click to switch layouts in this one)`;
     item.command = {
-      command: COMMANDS.apply,
-      title: 'Switch to Worktree Layout',
+      command: COMMANDS.openWindow,
+      title: 'Open Worktree in New Window',
       arguments: [worktree.folderUri],
     };
 

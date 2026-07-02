@@ -30,12 +30,12 @@ interface PrInfo {
 
 type PrLookup = { kind: 'pr'; pr: PrInfo } | { kind: 'none' } | { kind: 'no-gh' };
 
-/** One row in the Pull Request view. */
-interface PrRow {
-  readonly label: string;
-  readonly description?: string;
-  readonly tooltip?: string;
-  readonly command?: vscode.Command;
+/** What the webview currently shows, kept for resolving button messages. */
+interface PrViewState {
+  folderUri: string;
+  cwd: string;
+  lookup: PrLookup;
+  createUrl?: string;
 }
 
 /** Description files opened for editing, keyed by fsPath — save publishes. */
@@ -43,12 +43,12 @@ type PendingEdits = Map<string, { cwd: string; number: number }>;
 
 /** Sets up the Pull Request view, its commands, and the save-to-publish hook. */
 export function registerPrView(context: vscode.ExtensionContext, store: LayoutStore): void {
-  const provider = new PrTreeProvider(store);
+  const provider = new PrWebviewProvider(store);
   const pendingEdits: PendingEdits = new Map();
 
   context.subscriptions.push(
     provider,
-    vscode.window.registerTreeDataProvider('tab-manager.pr', provider),
+    vscode.window.registerWebviewViewProvider('tab-manager.worktreePr', provider),
     vscode.commands.registerCommand(PR_COMMANDS.refresh, () => provider.refresh()),
     vscode.commands.registerCommand(PR_COMMANDS.link, (worktree: WorktreeElement) =>
       linkPr(store, worktree)
@@ -68,15 +68,16 @@ export function registerPrView(context: vscode.ExtensionContext, store: LayoutSt
 }
 
 /**
- * The "Pull Request" view: the active worktree's PR — manually linked via
- * "Link with PR…" on the worktree, else looked up from the branch — with
- * rows to rename it and rewrite its description.
+ * The "Pull Request" view — a webview, because tree rows have no typography
+ * control and the PR title should be big and fully wrapped. Shows the active
+ * worktree's PR (manually linked via "Link with PR…", else looked up from
+ * the branch) with actions to open, rename, and rewrite its description.
  */
-class PrTreeProvider implements vscode.TreeDataProvider<PrRow>, vscode.Disposable {
-  private readonly emitter = new vscode.EventEmitter<void>();
-  readonly onDidChangeTreeData = this.emitter.event;
+class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
+  private readonly views = new Set<vscode.WebviewView>();
   private readonly subscription: vscode.Disposable;
   private stateSignature: string;
+  private lastState: PrViewState | undefined;
 
   constructor(private readonly store: LayoutStore) {
     this.stateSignature = this.signature();
@@ -84,7 +85,7 @@ class PrTreeProvider implements vscode.TreeDataProvider<PrRow>, vscode.Disposabl
       const signature = this.signature();
       if (signature !== this.stateSignature) {
         this.stateSignature = signature;
-        this.emitter.fire();
+        this.refresh();
       }
     });
   }
@@ -95,81 +96,144 @@ class PrTreeProvider implements vscode.TreeDataProvider<PrRow>, vscode.Disposabl
     return `${active}|${linked?.number}|${linked?.title}`;
   }
 
-  refresh(): void {
-    this.emitter.fire();
+  resolveWebviewView(view: vscode.WebviewView): void {
+    view.webview.options = { enableScripts: true };
+    this.views.add(view);
+    view.onDidDispose(() => this.views.delete(view));
+    view.webview.onDidReceiveMessage((message: { type: string }) => this.onMessage(message));
+    void this.render();
   }
 
-  async getChildren(element?: PrRow): Promise<PrRow[]> {
+  refresh(): void {
+    void this.render();
+  }
+
+  private async render(): Promise<void> {
+    if (this.views.size === 0) {
+      return;
+    }
+    const state = await this.computeState();
+    this.lastState = state;
+    const html = renderHtml(state);
+    for (const view of this.views) {
+      view.webview.html = html;
+    }
+  }
+
+  private async computeState(): Promise<PrViewState | undefined> {
     const folderUri = this.store.activeFolderUri;
-    if (element || !folderUri) {
-      return []; // leaf rows; no active worktree → welcome content shows
+    if (!folderUri) {
+      return undefined;
     }
     const cwd = vscode.Uri.parse(folderUri).fsPath;
-
     const lookup = await lookUpPr(cwd, this.store.linkedPr(folderUri)?.number);
-    if (lookup.kind === 'no-gh') {
-      return [{ label: 'GitHub CLI (gh) not found', description: 'brew install gh' }];
+    if (lookup.kind === 'pr' && this.store.linkedPr(folderUri)?.number === lookup.pr.number) {
+      // Keep the Layouts row (which displays the linked PR's title) fresh.
+      void this.store.setLinkedPrTitle(folderUri, lookup.pr.title);
     }
-    if (lookup.kind === 'none') {
-      const rows: PrRow[] = [
-        { label: 'No pull request', description: 'right-click a worktree to link one' },
-      ];
-      const url = await compareUrl(cwd);
-      if (url) {
-        rows.push({
-          label: 'Create PR on GitHub…',
-          tooltip: 'Open GitHub compare view for this branch',
-          command: openUrlCommand(url),
-        });
-      }
-      return rows;
-    }
-
-    const { pr } = lookup;
-    // Keep the Layouts row (which displays the linked PR's title) fresh.
-    if (this.store.linkedPr(folderUri)?.number === pr.number) {
-      void this.store.setLinkedPrTitle(folderUri, pr.title);
-    }
-    return [
-      {
-        label: `#${pr.number} ${pr.title}`,
-        description: pr.isDraft ? `${pr.state} · draft` : pr.state,
-        tooltip: 'Open the pull request on GitHub',
-        command: openUrlCommand(pr.url),
-      },
-      {
-        label: 'Rename PR…',
-        tooltip: 'Change the pull request title',
-        command: {
-          command: PR_COMMANDS.editTitle,
-          title: 'Rename PR',
-          arguments: [folderUri, cwd, pr.number, pr.title],
-        },
-      },
-      {
-        label: 'Edit description…',
-        tooltip: 'Opens the description as markdown — save (⌘S) to publish it to the PR',
-        command: {
-          command: PR_COMMANDS.editDescription,
-          title: 'Edit PR Description',
-          arguments: [cwd, pr.number],
-        },
-      },
-    ];
+    const createUrl = lookup.kind === 'none' ? await compareUrl(cwd) : undefined;
+    return { folderUri, cwd, lookup, createUrl };
   }
 
-  getTreeItem(row: PrRow): vscode.TreeItem {
-    const item = new vscode.TreeItem(row.label, vscode.TreeItemCollapsibleState.None);
-    item.description = row.description;
-    item.tooltip = row.tooltip;
-    item.command = row.command;
-    return item;
+  private onMessage(message: { type: string }): void {
+    const state = this.lastState;
+    if (!state) {
+      return;
+    }
+    const pr = state.lookup.kind === 'pr' ? state.lookup.pr : undefined;
+    switch (message.type) {
+      case 'open':
+        if (pr) {
+          void vscode.commands.executeCommand('vscode.open', vscode.Uri.parse(pr.url));
+        }
+        break;
+      case 'rename':
+        if (pr) {
+          void vscode.commands.executeCommand(
+            PR_COMMANDS.editTitle,
+            state.folderUri,
+            state.cwd,
+            pr.number,
+            pr.title
+          );
+        }
+        break;
+      case 'edit-description':
+        if (pr) {
+          void vscode.commands.executeCommand(PR_COMMANDS.editDescription, state.cwd, pr.number);
+        }
+        break;
+      case 'create':
+        if (state.createUrl) {
+          void vscode.commands.executeCommand('vscode.open', vscode.Uri.parse(state.createUrl));
+        }
+        break;
+    }
   }
 
   dispose(): void {
     this.subscription.dispose();
-    this.emitter.dispose();
   }
+}
+
+function renderHtml(state: PrViewState | undefined): string {
+  let content: string;
+  if (!state) {
+    content = `<p class="muted">Click a worktree in the Layouts section to see its pull request.</p>`;
+  } else if (state.lookup.kind === 'no-gh') {
+    content = `<p class="muted">GitHub CLI (gh) not found — <code>brew install gh</code>.</p>`;
+  } else if (state.lookup.kind === 'none') {
+    const create = state.createUrl
+      ? `<button data-cmd="create">Create PR on GitHub…</button>`
+      : '';
+    content = `<p class="muted">No pull request — right-click a worktree to link one.</p>${create}`;
+  } else {
+    const pr = state.lookup.pr;
+    const badge = pr.isDraft ? `${pr.state} · draft` : pr.state;
+    content = `
+      <div class="title">${escapeHtml(pr.title)}</div>
+      <div class="meta">#${pr.number} · ${escapeHtml(badge)}</div>
+      <div class="actions">
+        <button data-cmd="open">Open on GitHub</button>
+        <button data-cmd="rename">Rename…</button>
+        <button data-cmd="edit-description">Edit description…</button>
+      </div>`;
+  }
+
+  return `<!DOCTYPE html>
+<html>
+<head><style>
+  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 8px 12px; }
+  .title { font-size: 1.35em; font-weight: 600; line-height: 1.35; word-wrap: break-word; }
+  .meta { margin-top: 4px; opacity: 0.75; }
+  .muted { opacity: 0.75; }
+  .actions { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+  button {
+    border: none; padding: 5px 10px; text-align: center; cursor: pointer;
+    color: var(--vscode-button-foreground); background: var(--vscode-button-background);
+    border-radius: 2px; font-family: inherit;
+  }
+  button:hover { background: var(--vscode-button-hoverBackground); }
+  code { font-family: var(--vscode-editor-font-family); }
+</style></head>
+<body>
+  ${content}
+  <script>
+    const api = acquireVsCodeApi();
+    for (const button of document.querySelectorAll('button')) {
+      button.addEventListener('click', () => api.postMessage({ type: button.dataset.cmd }));
+    }
+  </script>
+</body>
+</html>`;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 /** Right-click "Link with PR…": pick from open PRs, type a number, or unlink. */
@@ -233,7 +297,7 @@ async function editTitle(
   cwd: string,
   prNumber: number,
   currentTitle: string,
-  provider: PrTreeProvider
+  provider: PrWebviewProvider
 ): Promise<void> {
   const title = await vscode.window.showInputBox({
     prompt: `New title for PR #${prNumber}`,

@@ -22,6 +22,7 @@ export const COMMANDS = {
   deleteWorktree: 'tabManager.deleteWorktree',
   copyPath: 'tabManager.copyWorktreePath',
   newWorktree: 'tabManager.newWorktree',
+  openWindow: 'tabManager.openWorktreeWindow',
 } as const;
 
 export function registerCommands(
@@ -56,7 +57,17 @@ export function registerCommands(
   };
 
   register(COMMANDS.save, () => saveCurrentArrangement(store));
-  register(COMMANDS.apply, (folderUri: string) => requestSwitch(folderUri));
+  // Bound from row clicks with a string, and from the context menu with the
+  // tree element — accept both.
+  register(COMMANDS.apply, (target: string | WorktreeElement) =>
+    requestSwitch(typeof target === 'string' ? target : target.folderUri)
+  );
+  register(COMMANDS.openWindow, (folderUri: string) => {
+    log(`open window: ${folderName(folderUri)}`);
+    return vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.parse(folderUri), {
+      forceNewWindow: true,
+    });
+  });
   register(COMMANDS.clear, (worktree: WorktreeElement) => clearWorktreeLayout(store, worktree));
   register(COMMANDS.deleteWorktree, (worktree: WorktreeElement) =>
     deleteWorktree(store, worktree)
