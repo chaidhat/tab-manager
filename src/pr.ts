@@ -187,20 +187,9 @@ class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable
           void vscode.commands.executeCommand('vscode.open', vscode.Uri.parse(pr.url));
         }
         break;
-      case 'rename':
+      case 'more':
         if (pr) {
-          void vscode.commands.executeCommand(
-            PR_COMMANDS.editTitle,
-            state.folderUri,
-            state.cwd,
-            pr.number,
-            pr.title,
-          );
-        }
-        break;
-      case 'edit-description':
-        if (pr) {
-          void vscode.commands.executeCommand(PR_COMMANDS.editDescription, state.cwd, pr.number);
+          void showMoreActions(state, pr);
         }
         break;
       case 'create':
@@ -236,9 +225,9 @@ const SVG_MERGED =
   '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.45 5.154A4.25 4.25 0 0 0 9.25 7.5h1.378a2.251 2.251 0 1 1 0 1.5H9.25A5.734 5.734 0 0 1 5 7.123v3.505a2.25 2.25 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.95-.218ZM4.25 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm8.5-4.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z"/></svg>';
 const SVG_CLOSED =
   '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.25 1A2.25 2.25 0 0 1 4 5.372v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.251 2.251 0 0 1 3.25 1Zm9.5 5.5a.75.75 0 0 1 .75.75v3.378a2.251 2.251 0 1 1-1.5 0V7.25a.75.75 0 0 1 .75-.75Zm-2.03-5.273a.75.75 0 0 1 1.06 0l.97.97.97-.97a.749.749 0 0 1 1.275.326.749.749 0 0 1-.215.734l-.97.97.97.97a.751.751 0 0 1-.018 1.042.751.751 0 0 1-1.042.018l-.97-.97-.97.97a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734l.97-.97-.97-.97a.75.75 0 0 1 0-1.06ZM2.5 3.25a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0ZM3.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm9.5 0a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z"/></svg>';
-// Codicon "gear" (16px), used for the PR view's overflow-actions button.
-const SVG_GEAR =
-  '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M9.1 4.4L8.6 2H7.4l-.5 2.4-.7.3-2-1.3-.9.8 1.3 2-.2.7-2.4.5v1.2l2.4.5.3.8-1.3 2 .8.8 2-1.3.8.3.4 2.3h1.2l.5-2.4.8-.3 2 1.3.8-.8-1.3-2 .3-.8 2.3-.4V7.4l-2.4-.5-.3-.8 1.3-2-.8-.8-2 1.3-.7-.2zM9.4 1l.5 2.4L12 2.1l2 2-1.4 2.1 2.4.5v2.8l-2.4.5L14 12l-2 2-2.1-1.4-.5 2.4H6.6l-.5-2.4L4 13.9l-2-2 1.4-2.1L1 9.4V6.6l2.4-.5L2 4l2-2 2.1 1.4L6.6 1h2.8zM8 10.9c1.6 0 2.9-1.3 2.9-2.9S9.6 5.1 8 5.1 5.1 6.4 5.1 8s1.3 2.9 2.9 2.9z"/></svg>';
+// Codicon "ellipsis" (16px) — VS Code's standard "More Actions…" toolbar icon.
+const SVG_ELLIPSIS =
+  '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="2.5" cy="8" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="13.5" cy="8" r="1.5"/></svg>';
 
 /** Icon, label, and color per PR state for the webview badge. */
 const PR_WEB_BADGE: Record<PrVisualState, { label: string; color: string; svg: string }> = {
@@ -273,13 +262,7 @@ function renderHtml(state: PrViewState | undefined): string {
       </div>
       <div class="actions">
         <button class="primary" data-cmd="open">Open on GitHub</button>
-        <div class="menu">
-          <button class="icon-button" id="settings-toggle" aria-label="More actions" aria-haspopup="true">${SVG_GEAR}</button>
-          <div class="dropdown" id="settings-dropdown" hidden>
-            <button class="dropdown-item" data-cmd="rename">Rename…</button>
-            <button class="dropdown-item" data-cmd="edit-description">Edit description…</button>
-          </div>
-        </div>
+        <button class="icon-button" data-cmd="more" aria-label="More actions">${SVG_ELLIPSIS}</button>
       </div>
       <div class="description">${renderMarkdown(pr.body)}</div>`;
   }
@@ -317,43 +300,18 @@ function renderHtml(state: PrViewState | undefined): string {
     color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground);
   }
   button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
-  .menu { position: relative; }
   button.icon-button {
     height: 100%; padding: 5px 6px; display: flex; align-items: center; justify-content: center;
     color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground);
   }
-  button.icon-button:hover, button.icon-button.active { background: var(--vscode-button-secondaryHoverBackground); }
+  button.icon-button:hover { background: var(--vscode-button-secondaryHoverBackground); }
   button.icon-button svg { width: 14px; height: 14px; fill: currentColor; }
-  .dropdown {
-    position: absolute; top: calc(100% + 4px); right: 0; z-index: 1; min-width: 160px;
-    background: var(--vscode-menu-background); color: var(--vscode-menu-foreground);
-    border: 1px solid var(--vscode-menu-border); border-radius: 3px; padding: 4px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25); display: flex; flex-direction: column; gap: 2px;
-  }
-  button.dropdown-item {
-    background: transparent; color: inherit; text-align: left; padding: 4px 8px; border-radius: 2px;
-  }
-  button.dropdown-item:hover { background: var(--vscode-menu-selectionBackground); color: var(--vscode-menu-selectionForeground); }
   code { font-family: var(--vscode-editor-font-family); }
 </style></head>
 <body>
   ${content}
   <script>
     const api = acquireVsCodeApi();
-    const toggle = document.getElementById('settings-toggle');
-    const dropdown = document.getElementById('settings-dropdown');
-    const closeDropdown = () => {
-      if (dropdown) {
-        dropdown.hidden = true;
-        toggle?.classList.remove('active');
-      }
-    };
-    toggle?.addEventListener('click', (event) => {
-      event.stopPropagation();
-      dropdown.hidden = !dropdown.hidden;
-      toggle.classList.toggle('active', !dropdown.hidden);
-    });
-    document.addEventListener('click', closeDropdown);
     for (const button of document.querySelectorAll('button[data-cmd]')) {
       button.addEventListener('click', () => api.postMessage({ type: button.dataset.cmd }));
     }
@@ -547,6 +505,26 @@ async function linkPr(store: LayoutStore, worktree: WorktreeElement): Promise<vo
   }
   await store.setLinkedPr(worktree.folderUri, { number: prNumber, title: prTitle });
   vscode.window.showInformationMessage(`Linked "${worktree.name}" with PR #${prNumber}.`);
+}
+
+/** The webview's "…" overflow button: a native quick-pick, like elsewhere in the extension. */
+async function showMoreActions(state: PrViewState, pr: PrInfo): Promise<void> {
+  const RENAME = '$(edit) Rename…';
+  const EDIT_DESCRIPTION = '$(note) Edit description…';
+  const choice = await vscode.window.showQuickPick([{ label: RENAME }, { label: EDIT_DESCRIPTION }], {
+    placeHolder: `PR #${pr.number} actions`,
+  });
+  if (choice?.label === RENAME) {
+    void vscode.commands.executeCommand(
+      PR_COMMANDS.editTitle,
+      state.folderUri,
+      state.cwd,
+      pr.number,
+      pr.title,
+    );
+  } else if (choice?.label === EDIT_DESCRIPTION) {
+    void vscode.commands.executeCommand(PR_COMMANDS.editDescription, state.cwd, pr.number);
+  }
 }
 
 async function editTitle(

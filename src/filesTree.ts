@@ -140,14 +140,38 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
 
   private async listChildren(dirUri: vscode.Uri): Promise<FileEntry[]> {
     const entries = await listDirectory(dirUri);
-    if (!this.changedFiles || !this.changedDirs) {
-      return entries;
+    const filtered =
+      this.changedFiles && this.changedDirs
+        ? entries.filter((entry) =>
+            entry.isDirectory
+              ? this.changedDirs!.has(entry.uri.fsPath)
+              : this.changedFiles!.has(entry.uri.fsPath),
+          )
+        : entries;
+    return Promise.all(filtered.map((entry) => this.compressChain(entry)));
+  }
+
+  /**
+   * Collapses a run of single-child directories into one row (e.g. `a/b/c`
+   * instead of three nested rows), matching VS Code's own "compact folders"
+   * explorer behavior. The row's uri points at the deepest folder, so
+   * expanding it lists that folder's children directly.
+   */
+  private async compressChain(entry: FileEntry): Promise<FileEntry> {
+    if (!entry.isDirectory) {
+      return entry;
     }
-    return entries.filter((entry) =>
-      entry.isDirectory
-        ? this.changedDirs!.has(entry.uri.fsPath)
-        : this.changedFiles!.has(entry.uri.fsPath),
-    );
+    const names = [entry.name];
+    let deepest = entry;
+    for (;;) {
+      const children = await this.listChildren(deepest.uri);
+      if (children.length !== 1 || !children[0].isDirectory) {
+        break;
+      }
+      deepest = children[0];
+      names.push(deepest.name);
+    }
+    return names.length === 1 ? entry : { uri: deepest.uri, name: names.join('/'), isDirectory: true };
   }
 
   /** Refreshes the changed-file set (and the folders containing them). */
