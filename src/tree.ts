@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { COMMANDS } from './commands';
-import { PrInfo, prThemeIcon, resolveWorktreePr } from './pr';
+import { PrInfo, prThemeIcon, prVisualState, resolveWorktreePr, summarizeChecks } from './pr';
 import { LayoutStore } from './store';
 import { WorktreeElement } from './types';
 import { currentBranch, groupFoldersByRepo } from './worktrees';
@@ -14,10 +14,26 @@ export interface RepoSection {
   readonly worktrees: WorktreeElement[];
 }
 
-export type TreeElement = RepoSection | WorktreeElement;
+/** A status line rendered under a PR row: CI checks or base-branch conflicts. */
+export interface PrStatusElement {
+  /** folderUri of the worktree row this status belongs to. */
+  readonly parentUri: string;
+  readonly kind: 'checks' | 'conflicts';
+  readonly label: string;
+  readonly codicon: string;
+  readonly color: string;
+  /** Where a click goes — the PR (or its checks tab) on GitHub. */
+  readonly url: string;
+}
+
+export type TreeElement = RepoSection | WorktreeElement | PrStatusElement;
 
 function isRepoSection(element: TreeElement): element is RepoSection {
   return 'worktrees' in element;
+}
+
+function isPrStatus(element: TreeElement): element is PrStatusElement {
+  return 'parentUri' in element;
 }
 
 /**
@@ -61,7 +77,13 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
 
   async getChildren(element?: TreeElement): Promise<TreeElement[]> {
     if (element) {
-      return isRepoSection(element) ? element.worktrees : [];
+      if (isRepoSection(element)) {
+        return element.worktrees;
+      }
+      if (isPrStatus(element)) {
+        return [];
+      }
+      return this.prStatusRows(element);
     }
 
     const folders = vscode.workspace.workspaceFolders ?? [];
@@ -145,8 +167,81 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
     });
   }
 
+  /**
+   * The status lines shown under a PR row: one for CI checks, one for merge
+   * conflicts with the base branch. Built from the already-cached PR lookup
+   * (which fetches `statusCheckRollup` and `mergeable` alongside the title),
+   * so no extra `gh` call happens — the rows appear once the background
+   * resolution lands. Empty for merged/closed PRs, where both are moot.
+   */
+  private prStatusRows(worktree: WorktreeElement): PrStatusElement[] {
+    const pr = this.prCache.get(worktree.folderUri);
+    if (!pr) {
+      return [];
+    }
+    const visual = prVisualState(pr.state, pr.isDraft);
+    if (visual === 'merged' || visual === 'closed') {
+      return [];
+    }
+
+    const rows: PrStatusElement[] = [];
+    const checks = summarizeChecks(pr.statusCheckRollup);
+    if (checks) {
+      const row = (label: string, codicon: string, color: string): PrStatusElement => ({
+        parentUri: worktree.folderUri,
+        kind: 'checks',
+        label,
+        codicon,
+        color,
+        url: `${pr.url}/checks`,
+      });
+      if (checks.failed > 0) {
+        rows.push(row(`${checks.failed} of ${checks.total} checks failed`, 'x', 'charts.red'));
+      } else if (checks.pending > 0) {
+        rows.push(
+          row(`Checks running (${checks.passed}/${checks.total})`, 'sync~spin', 'charts.yellow'),
+        );
+      } else {
+        rows.push(row('All checks passed', 'check', 'charts.green'));
+      }
+    }
+
+    // Conflicts only get a row when GitHub definitively reports them — a green
+    // "no conflicts" line on every PR would drown out the checks signal.
+    if (pr.mergeable?.toUpperCase() === 'CONFLICTING') {
+      rows.push({
+        parentUri: worktree.folderUri,
+        kind: 'conflicts',
+        label: `Conflicts with ${pr.baseRefName}`,
+        codicon: 'warning',
+        color: 'charts.red',
+        url: pr.url,
+      });
+    }
+    return rows;
+  }
+
   getTreeItem(element: TreeElement): vscode.TreeItem {
-    return isRepoSection(element) ? this.repoItem(element) : this.worktreeItem(element);
+    if (isRepoSection(element)) {
+      return this.repoItem(element);
+    }
+    if (isPrStatus(element)) {
+      return this.prStatusItem(element);
+    }
+    return this.worktreeItem(element);
+  }
+
+  private prStatusItem(status: PrStatusElement): vscode.TreeItem {
+    const item = new vscode.TreeItem(status.label, vscode.TreeItemCollapsibleState.None);
+    item.id = `pr-status:${status.kind}:${status.parentUri}`;
+    item.iconPath = new vscode.ThemeIcon(status.codicon, new vscode.ThemeColor(status.color));
+    item.contextValue = 'pr-status';
+    item.command = {
+      command: 'vscode.open',
+      title: 'Open on GitHub',
+      arguments: [vscode.Uri.parse(status.url)],
+    };
+    return item;
   }
 
   private repoItem(section: RepoSection): vscode.TreeItem {
@@ -171,7 +266,14 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
     const resolved = this.prCache.get(worktree.folderUri);
     const prNumber = resolved?.number;
     const label = resolved ? `#${resolved.number}: ${resolved.title}` : worktree.name;
-    const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
+    // A PR with status lines (checks / conflicts) expands to show them. The
+    // id changes when the rows appear because VS Code records collapse state
+    // per id — reusing the pre-resolution id would leave the row unexpandable.
+    const hasStatus = this.prStatusRows(worktree).length > 0;
+    const collapsible = hasStatus
+      ? vscode.TreeItemCollapsibleState.Expanded
+      : vscode.TreeItemCollapsibleState.None;
+    const item = new vscode.TreeItem(label, collapsible);
 
     // A resolved PR gets a state-colored icon (open green, draft grey, merged
     // purple, closed red).
@@ -179,7 +281,7 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
       item.iconPath = prThemeIcon(resolved.state, resolved.isDraft);
     }
 
-    item.id = `worktree:${worktree.folderUri}`;
+    item.id = hasStatus ? `worktree-pr:${worktree.folderUri}` : `worktree:${worktree.folderUri}`;
     // Menu `when` clauses match these exact markers: closed (not an open
     // workspace folder) gates "Delete Worktree".
     item.contextValue = worktree.isOpen ? 'worktree-open' : 'worktree-closed';

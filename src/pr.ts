@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { errorMessage, gh, git } from './cli';
 import { log } from './log';
 import { LayoutStore } from './store';
+import { currentBranch } from './worktrees';
 
 const PR_COMMANDS = {
   refresh: 'tabManager.refreshPr',
@@ -88,7 +89,8 @@ export function prThemeIcon(state: string, isDraft: boolean): vscode.ThemeIcon {
 interface PrViewState {
   cwd: string;
   lookup: PrLookup;
-  createUrl?: string;
+  /** The checked-out branch, when there is no PR yet — what "Create PR" targets. */
+  branch?: string;
 }
 
 /** The `data-vscode-context` payload the "…" button's menu commands receive. */
@@ -175,7 +177,13 @@ class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable
     for (const view of this.views) {
       // VS Code's own icon font, mapped to a webview-servable URI per view.
       const codiconsUri = view.webview.asWebviewUri(
-        vscode.Uri.joinPath(this.extensionUri, 'node_modules', '@vscode/codicons', 'dist', 'codicon.css'),
+        vscode.Uri.joinPath(
+          this.extensionUri,
+          'node_modules',
+          '@vscode/codicons',
+          'dist',
+          'codicon.css',
+        ),
       );
       view.webview.html = renderHtml(state, codiconsUri.toString());
     }
@@ -188,8 +196,8 @@ class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable
     }
     const cwd = vscode.Uri.parse(folderUri).fsPath;
     const lookup = await lookUpPr(cwd);
-    const createUrl = lookup.kind === 'none' ? await compareUrl(cwd) : undefined;
-    return { cwd, lookup, createUrl };
+    const branch = lookup.kind === 'none' ? await currentBranch(cwd) : undefined;
+    return { cwd, lookup, branch };
   }
 
   private onMessage(message: { type: string }): void {
@@ -205,8 +213,8 @@ class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable
         }
         break;
       case 'create':
-        if (state.createUrl) {
-          void vscode.commands.executeCommand('vscode.open', vscode.Uri.parse(state.createUrl));
+        if (state.branch) {
+          void createPr(state.cwd, state.branch, this);
         }
         break;
     }
@@ -230,6 +238,30 @@ const PR_WEB_BADGE: Record<PrVisualState, { label: string; color: string }> = {
   closed: { label: 'Closed', color: 'var(--vscode-charts-red)' },
 };
 
+// Digit → color for the strip above a PR: one 1em swatch per digit of the PR
+// number, in order (e.g. #648 → green, blue, green).
+const DIGIT_COLORS: Record<string, string> = {
+  '0': '#fff',
+  '1': '#000',
+  '2': '#fdbc00',
+  '3': '#00ce00',
+  '4': '#006eff',
+  '5': '#d4044e',
+  '6': '#00a500',
+  '7': '#e45a00',
+  '8': '#00c86b',
+  '9': '#7f00ff',
+};
+
+/** The color-coded digit strip pinned to the very top of the PR view. */
+function renderDigitStrip(prNumber: number): string {
+  const swatches = String(prNumber)
+    .split('')
+    .map((digit) => `<div class="digit" style="background: ${DIGIT_COLORS[digit]}"></div>`)
+    .join('');
+  return `<div class="digits" aria-label="PR #${prNumber}">${swatches}</div>`;
+}
+
 function renderHtml(state: PrViewState | undefined, codiconsHref: string): string {
   let content: string;
   if (!state) {
@@ -237,7 +269,7 @@ function renderHtml(state: PrViewState | undefined, codiconsHref: string): strin
   } else if (state.lookup.kind === 'no-gh') {
     content = `<p class="muted">GitHub CLI (gh) not found — <code>brew install gh</code>.</p>`;
   } else if (state.lookup.kind === 'none') {
-    const create = state.createUrl
+    const create = state.branch
       ? `<div class="actions"><button class="primary" data-cmd="create">Create PR…</button></div>`
       : '';
     content = `
@@ -254,6 +286,7 @@ function renderHtml(state: PrViewState | undefined, codiconsHref: string): strin
     // what the menu's commands receive.
     const menuContext: PrMenuContext = { cwd: state.cwd, prNumber: pr.number, prTitle: pr.title };
     content = `
+      ${renderDigitStrip(pr.number)}
       <div class="title">${escapeHtml(pr.title)}</div>
       <div class="meta">
         <span class="state" style="color: ${badge.color}">${codicon(PR_TREE_ICON[visual].codicon)}${badge.label}</span>
@@ -276,6 +309,11 @@ function renderHtml(state: PrViewState | undefined, codiconsHref: string): strin
 <link rel="stylesheet" href="${codiconsHref}">
 <style>
   body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 8px 12px; }
+  /* Negative margins cancel the body padding so the strip sits flush with the
+     view's top edge; the inset hairline keeps the white "0" swatch visible on
+     light themes (and black "1" on dark). */
+  .digits { display: flex; margin: -8px -12px 8px; }
+  .digit { width: 1em; height: 1em; box-shadow: inset 0 0 0 1px var(--vscode-panel-border); }
   .title { font-size: 1.35em; font-weight: 600; line-height: 1.35; word-wrap: break-word; }
   .meta { margin-top: 6px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .state { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; }
@@ -355,7 +393,41 @@ function renderMergeability(pr: PrInfo): string {
 // gh's per-check outcomes, folded into pass/fail; anything else (QUEUED,
 // IN_PROGRESS, PENDING, EXPECTED, empty-while-running) counts as pending.
 const CHECK_PASS = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
-const CHECK_FAIL = new Set(['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED', 'STARTUP_FAILURE']);
+const CHECK_FAIL = new Set([
+  'FAILURE',
+  'ERROR',
+  'TIMED_OUT',
+  'CANCELLED',
+  'ACTION_REQUIRED',
+  'STARTUP_FAILURE',
+]);
+
+/** Pass/fail/pending counts across a PR's CI checks. */
+export interface ChecksSummary {
+  total: number;
+  passed: number;
+  failed: number;
+  pending: number;
+}
+
+/** Folds gh's `statusCheckRollup` into counts. Undefined when there are no checks. */
+export function summarizeChecks(rollup: StatusCheck[] | null): ChecksSummary | undefined {
+  const checks = rollup ?? [];
+  if (checks.length === 0) {
+    return undefined;
+  }
+  let passed = 0;
+  let failed = 0;
+  for (const check of checks) {
+    const outcome = (check.conclusion || check.state || check.status || '').toUpperCase();
+    if (CHECK_PASS.has(outcome)) {
+      passed++;
+    } else if (CHECK_FAIL.has(outcome)) {
+      failed++;
+    }
+  }
+  return { total: checks.length, passed, failed, pending: checks.length - passed - failed };
+}
 
 /**
  * The CI-checks line under the merge indicator: red X when any check failed,
@@ -367,26 +439,15 @@ function renderChecks(pr: PrInfo): string {
   if (visual === 'merged' || visual === 'closed') {
     return '';
   }
-  const rollup = pr.statusCheckRollup ?? [];
-  if (rollup.length === 0) {
+  const checks = summarizeChecks(pr.statusCheckRollup);
+  if (!checks) {
     return '';
   }
-  let passed = 0;
-  let failed = 0;
-  for (const check of rollup) {
-    const outcome = (check.conclusion || check.state || check.status || '').toUpperCase();
-    if (CHECK_PASS.has(outcome)) {
-      passed++;
-    } else if (CHECK_FAIL.has(outcome)) {
-      failed++;
-    }
+  if (checks.failed > 0) {
+    return `<span class="state" style="color: var(--vscode-charts-red)">${codicon('x')}${checks.failed} of ${checks.total} checks failed</span>`;
   }
-  const pending = rollup.length - passed - failed;
-  if (failed > 0) {
-    return `<span class="state" style="color: var(--vscode-charts-red)">${codicon('x')}${failed} of ${rollup.length} checks failed</span>`;
-  }
-  if (pending > 0) {
-    return `<span class="state" style="color: var(--vscode-charts-yellow)">${codicon('loading codicon-modifier-spin')}Checks running (${passed}/${rollup.length})</span>`;
+  if (checks.pending > 0) {
+    return `<span class="state" style="color: var(--vscode-charts-yellow)">${codicon('loading codicon-modifier-spin')}Checks running (${checks.passed}/${checks.total})</span>`;
   }
   return `<span class="state" style="color: var(--vscode-charts-green)">${codicon('check')}All checks passed</span>`;
 }
@@ -597,17 +658,33 @@ async function lookUpPr(cwd: string): Promise<PrLookup> {
   }
 }
 
-/** The GitHub compare URL for the current branch — the "create a PR" page. */
-async function compareUrl(cwd: string): Promise<string | undefined> {
-  try {
-    const branch = (await git(['branch', '--show-current'], cwd)).trim();
-    if (!branch) {
-      return undefined;
-    }
-    const stdout = await gh(['repo', 'view', '--json', 'url'], cwd);
-    const { url } = JSON.parse(stdout) as { url: string };
-    return `${url}/compare/${encodeURIComponent(branch)}?expand=1`;
-  } catch {
-    return undefined;
+/**
+ * Creates a PR for the branch without leaving VS Code: prompts for a title,
+ * pushes the branch (setting its upstream — `gh pr create` would otherwise
+ * stall on an interactive "where should we push?" prompt), creates the PR
+ * against the repo's default base via `gh`, then re-renders the view so the
+ * new PR shows immediately.
+ */
+async function createPr(cwd: string, branch: string, provider: PrWebviewProvider): Promise<void> {
+  const title = await vscode.window.showInputBox({
+    prompt: `Title for the pull request from "${branch}"`,
+    placeHolder: 'feat: …',
+    validateInput: (value) => (value.trim() ? undefined : 'Title cannot be empty'),
+  });
+  if (!title) {
+    return;
   }
+  try {
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `Creating PR for "${branch}"…` },
+      async () => {
+        await git(['push', '--set-upstream', 'origin', branch], cwd);
+        await gh(['pr', 'create', '--title', title.trim(), '--body', '', '--head', branch], cwd);
+      },
+    );
+    vscode.window.showInformationMessage(`Created PR for "${branch}".`);
+  } catch (error) {
+    vscode.window.showErrorMessage(errorMessage(error));
+  }
+  provider.refresh();
 }

@@ -147,10 +147,14 @@
         "icon": "$(copy)"
       },
       {
-        "command": "tabManager.newWorktree",
-        "title": "New Worktree",
-        "category": "Tab Manager",
-        "icon": "$(add)"
+        "command": "tabManager.newWorktreeBlank",
+        "title": "New Worktree…",
+        "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.newWorktreeFromPr",
+        "title": "New Worktree from PR…",
+        "category": "Tab Manager"
       },
       {
         "command": "tabManager.openWorktreeWindow",
@@ -186,7 +190,24 @@
         "icon": "$(collapse-all)"
       }
     ],
+    "submenus": [
+      {
+        "id": "tabManager.newWorktreeMenu",
+        "label": "New Worktree",
+        "icon": "$(add)"
+      }
+    ],
     "menus": {
+      "tabManager.newWorktreeMenu": [
+        {
+          "command": "tabManager.newWorktreeBlank",
+          "group": "1_new@1"
+        },
+        {
+          "command": "tabManager.newWorktreeFromPr",
+          "group": "1_new@2"
+        }
+      ],
       "view/title": [
         {
           "command": "tabManager.refreshPr",
@@ -216,7 +237,7 @@
       ],
       "view/item/context": [
         {
-          "command": "tabManager.newWorktree",
+          "submenu": "tabManager.newWorktreeMenu",
           "when": "view == tab-manager.layouts && viewItem == repo-git",
           "group": "inline"
         },
@@ -353,7 +374,11 @@
           "when": "false"
         },
         {
-          "command": "tabManager.newWorktree",
+          "command": "tabManager.newWorktreeBlank",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.newWorktreeFromPr",
           "when": "false"
         },
         {

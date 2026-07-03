@@ -10,7 +10,8 @@ import { addWorktree, addWorktreeForPr, removeWorktree } from './worktrees';
 export const COMMANDS = {
   openWindow: 'tabManager.openWorktreeWindow',
   copyPath: 'tabManager.copyWorktreePath',
-  newWorktree: 'tabManager.newWorktree',
+  newWorktreeBlank: 'tabManager.newWorktreeBlank',
+  newWorktreeFromPr: 'tabManager.newWorktreeFromPr',
   deleteWorktree: 'tabManager.deleteWorktree',
 } as const;
 
@@ -30,28 +31,21 @@ export function registerCommands(
   register(COMMANDS.copyPath, (worktree: WorktreeElement) =>
     vscode.env.clipboard.writeText(vscode.Uri.parse(worktree.folderUri).fsPath),
   );
-  register(COMMANDS.newWorktree, (section: RepoSection) => newWorktree(section, refreshWorktrees));
+  // Both live in the repo row's "+" dropdown (a native submenu, contributed
+  // in package.json), so each command is one flavor — no chooser step.
+  register(COMMANDS.newWorktreeBlank, (section: RepoSection) => {
+    if (section.repoRoot) {
+      return createNewWorktree({ ...section, repoRoot: section.repoRoot }, refreshWorktrees);
+    }
+  });
+  register(COMMANDS.newWorktreeFromPr, (section: RepoSection) => {
+    if (section.repoRoot) {
+      return createWorktreeFromPr({ ...section, repoRoot: section.repoRoot }, refreshWorktrees);
+    }
+  });
   register(COMMANDS.deleteWorktree, (worktree: WorktreeElement) =>
     deleteWorktree(worktree, refreshWorktrees),
   );
-}
-
-/** The repo row's "+": choose between a fresh worktree and one from a PR. */
-async function newWorktree(section: RepoSection, refreshWorktrees: () => void): Promise<void> {
-  const repoRoot = section.repoRoot;
-  if (!repoRoot) {
-    return;
-  }
-  const CREATE_NEW = 'Create New Worktree…';
-  const FROM_PR = 'Create From PR…';
-  const mode = await vscode.window.showQuickPick([CREATE_NEW, FROM_PR], {
-    placeHolder: `Add a worktree to ${section.label}`,
-  });
-  if (mode === CREATE_NEW) {
-    await createNewWorktree({ ...section, repoRoot }, refreshWorktrees);
-  } else if (mode === FROM_PR) {
-    await createWorktreeFromPr({ ...section, repoRoot }, refreshWorktrees);
-  }
 }
 
 /**
