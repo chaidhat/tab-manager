@@ -21,6 +21,7 @@ export interface PrInfo {
   isDraft: boolean;
   /** The branch the PR merges into — what changed files are diffed against. */
   baseRefName: string;
+  body: string;
 }
 
 type PrLookup = { kind: 'pr'; pr: PrInfo } | { kind: 'none' } | { kind: 'no-gh' };
@@ -33,7 +34,7 @@ type PrLookup = { kind: 'pr'; pr: PrInfo } | { kind: 'none' } | { kind: 'no-gh' 
 async function fetchPr(cwd: string, linkedNumber: number | undefined): Promise<PrInfo> {
   const selector = linkedNumber !== undefined ? [String(linkedNumber)] : [];
   const stdout = await gh(
-    ['pr', 'view', ...selector, '--json', 'number,title,state,url,isDraft,baseRefName'],
+    ['pr', 'view', ...selector, '--json', 'number,title,state,url,isDraft,baseRefName,body'],
     cwd,
   );
   return JSON.parse(stdout) as PrInfo;
@@ -251,11 +252,11 @@ function renderHtml(state: PrViewState | undefined): string {
   } else if (state.lookup.kind === 'no-gh') {
     content = `<p class="muted">GitHub CLI (gh) not found — <code>brew install gh</code>.</p>`;
   } else if (state.lookup.kind === 'none') {
-    const create = state.createUrl ? `<button data-cmd="create">Create PR on GitHub…</button>` : '';
+    const create = state.createUrl ? `<button class="secondary" data-cmd="create">Create PR…</button>` : '';
     content = `
       <p class="muted">No pull request for this worktree yet.</p>
       <div class="actions">
-        <button data-cmd="link">Link to PR…</button>
+        <button class="primary" data-cmd="link">Link to PR…</button>
         ${create}
       </div>`;
   } else {
@@ -267,10 +268,11 @@ function renderHtml(state: PrViewState | undefined): string {
         <span class="state" style="color: ${badge.color}">${badge.svg}${badge.label}</span>
         <span class="num">#${pr.number}</span>
       </div>
+      <div class="description">${renderMarkdown(pr.body)}</div>
       <div class="actions">
-        <button data-cmd="open">Open on GitHub</button>
-        <button data-cmd="rename">Rename…</button>
-        <button data-cmd="edit-description">Edit description…</button>
+        <button class="primary" data-cmd="open">Open on GitHub</button>
+        <button class="secondary" data-cmd="rename">Rename…</button>
+        <button class="secondary" data-cmd="edit-description">Edit description…</button>
       </div>`;
   }
 
@@ -284,13 +286,28 @@ function renderHtml(state: PrViewState | undefined): string {
   .state svg { width: 14px; height: 14px; fill: currentColor; }
   .num { opacity: 0.75; }
   .muted { opacity: 0.75; }
+  .description { margin-top: 12px; line-height: 1.5; word-wrap: break-word; }
+  .description :first-child { margin-top: 0; }
+  .description :last-child { margin-bottom: 0; }
+  .description h1, .description h2, .description h3 { font-size: 1.1em; }
+  .description pre {
+    background: var(--vscode-textCodeBlock-background); padding: 8px; border-radius: 3px;
+    overflow-x: auto;
+  }
+  .description a { color: var(--vscode-textLink-foreground); }
   .actions { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
   button {
     border: none; padding: 5px 10px; text-align: center; cursor: pointer;
-    color: var(--vscode-button-foreground); background: var(--vscode-button-background);
     border-radius: 2px; font-family: inherit;
   }
-  button:hover { background: var(--vscode-button-hoverBackground); }
+  button.primary {
+    color: var(--vscode-button-foreground); background: var(--vscode-button-background);
+  }
+  button.primary:hover { background: var(--vscode-button-hoverBackground); }
+  button.secondary {
+    color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground);
+  }
+  button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
   code { font-family: var(--vscode-editor-font-family); }
 </style></head>
 <body>
@@ -311,6 +328,88 @@ function escapeHtml(text: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+/**
+ * Renders a small, safe subset of GitHub-flavored markdown (headers, bold,
+ * italic, inline/fenced code, links, lists) to HTML. All text is HTML-escaped
+ * first, so no raw markdown input can inject markup.
+ */
+function renderMarkdown(markdown: string): string {
+  if (!markdown.trim()) {
+    return '<p class="muted">No description.</p>';
+  }
+
+  const escaped = escapeHtml(markdown).replace(/\r\n/g, '\n');
+  const inline = (text: string): string =>
+    text
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>')
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2">$1</a>');
+
+  const lines = escaped.split('\n');
+  const blocks: string[] = [];
+  let paragraph: string[] = [];
+  let list: string[] = [];
+  let inCodeBlock = false;
+  const codeLines: string[] = [];
+
+  const flushParagraph = (): void => {
+    if (paragraph.length > 0) {
+      blocks.push(`<p>${inline(paragraph.join(' '))}</p>`);
+      paragraph = [];
+    }
+  };
+  const flushList = (): void => {
+    if (list.length > 0) {
+      blocks.push(`<ul>${list.join('')}</ul>`);
+      list = [];
+    }
+  };
+
+  for (const line of lines) {
+    if (line.trimStart().startsWith('```')) {
+      if (inCodeBlock) {
+        blocks.push(`<pre><code>${codeLines.join('\n')}</code></pre>`);
+        codeLines.length = 0;
+      } else {
+        flushParagraph();
+        flushList();
+      }
+      inCodeBlock = !inCodeBlock;
+      continue;
+    }
+    if (inCodeBlock) {
+      codeLines.push(line);
+      continue;
+    }
+
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    const listItem = /^[-*]\s+(.*)$/.exec(line);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      const level = heading[1].length;
+      blocks.push(`<h${level}>${inline(heading[2])}</h${level}>`);
+    } else if (listItem) {
+      flushParagraph();
+      list.push(`<li>${inline(listItem[1])}</li>`);
+    } else if (line.trim() === '') {
+      flushParagraph();
+      flushList();
+    } else {
+      flushList();
+      paragraph.push(line.trim());
+    }
+  }
+  flushParagraph();
+  flushList();
+  if (inCodeBlock && codeLines.length > 0) {
+    blocks.push(`<pre><code>${codeLines.join('\n')}</code></pre>`);
+  }
+
+  return blocks.join('\n');
 }
 
 /**
