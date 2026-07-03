@@ -287,7 +287,7 @@ function renderHtml(state: PrViewState | undefined): string {
   }
   .description a { color: var(--vscode-textLink-foreground); }
   .actions { margin-top: 12px; display: flex; align-items: stretch; gap: 6px; }
-  .actions .primary { flex: 1; }
+  .actions .primary, .actions .secondary { flex: 1; }
   button {
     border: none; padding: 5px 10px; text-align: center; cursor: pointer;
     border-radius: 2px; font-family: inherit;
@@ -301,11 +301,11 @@ function renderHtml(state: PrViewState | undefined): string {
   }
   button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
   button.icon-button {
-    height: 100%; padding: 5px 6px; display: flex; align-items: center; justify-content: center;
-    color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground);
+    align-self: center; padding: 3px; display: flex; align-items: center; justify-content: center;
+    color: var(--vscode-icon-foreground); background: transparent; border-radius: 5px;
   }
-  button.icon-button:hover { background: var(--vscode-button-secondaryHoverBackground); }
-  button.icon-button svg { width: 14px; height: 14px; fill: currentColor; }
+  button.icon-button:hover { background: var(--vscode-toolbar-hoverBackground); }
+  button.icon-button svg { width: 16px; height: 16px; fill: currentColor; }
   code { font-family: var(--vscode-editor-font-family); }
 </style></head>
 <body>
