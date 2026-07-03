@@ -2,7 +2,6 @@ import * as vscode from 'vscode';
 import { errorMessage } from './cli';
 import { log } from './log';
 import { listOpenPrs } from './pr';
-import { LayoutStore } from './store';
 import type { RepoSection } from './tree';
 import { WorktreeElement } from './types';
 import { addWorktree, addWorktreeForPr, removeWorktree } from './worktrees';
@@ -17,7 +16,6 @@ export const COMMANDS = {
 
 export function registerCommands(
   context: vscode.ExtensionContext,
-  store: LayoutStore,
   refreshWorktrees: () => void,
 ): void {
   const register = (id: string, handler: (...args: never[]) => unknown) =>
@@ -32,20 +30,14 @@ export function registerCommands(
   register(COMMANDS.copyPath, (worktree: WorktreeElement) =>
     vscode.env.clipboard.writeText(vscode.Uri.parse(worktree.folderUri).fsPath),
   );
-  register(COMMANDS.newWorktree, (section: RepoSection) =>
-    newWorktree(store, section, refreshWorktrees),
-  );
+  register(COMMANDS.newWorktree, (section: RepoSection) => newWorktree(section, refreshWorktrees));
   register(COMMANDS.deleteWorktree, (worktree: WorktreeElement) =>
-    deleteWorktree(store, worktree, refreshWorktrees),
+    deleteWorktree(worktree, refreshWorktrees),
   );
 }
 
 /** The repo row's "+": choose between a fresh worktree and one from a PR. */
-async function newWorktree(
-  store: LayoutStore,
-  section: RepoSection,
-  refreshWorktrees: () => void,
-): Promise<void> {
+async function newWorktree(section: RepoSection, refreshWorktrees: () => void): Promise<void> {
   const repoRoot = section.repoRoot;
   if (!repoRoot) {
     return;
@@ -58,7 +50,7 @@ async function newWorktree(
   if (mode === CREATE_NEW) {
     await createNewWorktree({ ...section, repoRoot }, refreshWorktrees);
   } else if (mode === FROM_PR) {
-    await createWorktreeFromPr(store, { ...section, repoRoot }, refreshWorktrees);
+    await createWorktreeFromPr({ ...section, repoRoot }, refreshWorktrees);
   }
 }
 
@@ -90,12 +82,11 @@ async function createNewWorktree(
 }
 
 /**
- * Picks (searchably) one of the repo's open PRs, creates a worktree named
- * after its number with the PR's branch checked out, and links it to the PR
- * so its row shows the PR title.
+ * Picks (searchably) one of the repo's open PRs and creates a worktree named
+ * after its number with the PR's branch checked out — the row then shows the
+ * PR title via the branch-based `gh` lookup.
  */
 async function createWorktreeFromPr(
-  store: LayoutStore,
   section: RepoSection & { repoRoot: string },
   refreshWorktrees: () => void,
 ): Promise<void> {
@@ -116,17 +107,13 @@ async function createWorktreeFromPr(
   }
 
   try {
-    const worktreePath = await vscode.window.withProgress(
+    await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
         title: `Creating worktree for #${pick.pr.number}…`,
       },
       () => addWorktreeForPr(section.repoRoot, pick.pr.number),
     );
-    await store.setLinkedPr(vscode.Uri.file(worktreePath).toString(), {
-      number: pick.pr.number,
-      title: pick.pr.title,
-    });
     refreshWorktrees();
     vscode.window.showInformationMessage(
       `Created worktree "${pick.pr.number}" with PR #${pick.pr.number} checked out.`,
@@ -143,7 +130,6 @@ async function createWorktreeFromPr(
  * deleting a folder out from under the workspace breaks it.
  */
 async function deleteWorktree(
-  store: LayoutStore,
   worktree: WorktreeElement,
   refreshWorktrees: () => void,
 ): Promise<void> {
@@ -182,7 +168,6 @@ async function deleteWorktree(
     }
   }
 
-  await store.setLinkedPr(worktree.folderUri, undefined);
   refreshWorktrees();
   vscode.window.showInformationMessage(`Deleted worktree "${worktree.name}".`);
 }

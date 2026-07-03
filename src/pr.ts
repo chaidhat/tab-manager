@@ -1,16 +1,23 @@
-import * as path from 'path';
 import * as vscode from 'vscode';
 import { errorMessage, gh, git } from './cli';
 import { log } from './log';
 import { LayoutStore } from './store';
-import { WorktreeElement } from './types';
 
 const PR_COMMANDS = {
   refresh: 'tabManager.refreshPr',
-  link: 'tabManager.linkPr',
   editTitle: 'tabManager.editPrTitle',
   editDescription: 'tabManager.editPrDescription',
 } as const;
+
+/** One entry of gh's `statusCheckRollup`: a check run or a legacy commit status. */
+interface StatusCheck {
+  /** Check runs: QUEUED | IN_PROGRESS | COMPLETED. */
+  status?: string;
+  /** Check runs: SUCCESS | FAILURE | CANCELLED | SKIPPED | …; empty while running. */
+  conclusion?: string;
+  /** Legacy commit statuses: SUCCESS | FAILURE | ERROR | PENDING. */
+  state?: string;
+}
 
 /** A worktree's pull request, as reported by `gh pr view`. */
 export interface PrInfo {
@@ -23,25 +30,24 @@ export interface PrInfo {
   baseRefName: string;
   /** GitHub's merge check: MERGEABLE, CONFLICTING, or UNKNOWN (still computing). */
   mergeable: string;
+  /** Every CI check on the PR's head commit. */
+  statusCheckRollup: StatusCheck[] | null;
   body: string;
 }
 
 type PrLookup = { kind: 'pr'; pr: PrInfo } | { kind: 'none' } | { kind: 'no-gh' };
 
 /**
- * Fetches the PR for a folder: the linked PR by number if one is given,
- * otherwise the PR for the folder's current branch. Throws when there is no
- * PR or `gh` fails.
+ * Fetches the PR for the folder's current branch, resolved by `gh pr view`.
+ * Throws when there is no PR or `gh` fails.
  */
-async function fetchPr(cwd: string, linkedNumber: number | undefined): Promise<PrInfo> {
-  const selector = linkedNumber !== undefined ? [String(linkedNumber)] : [];
+async function fetchPr(cwd: string): Promise<PrInfo> {
   const stdout = await gh(
     [
       'pr',
       'view',
-      ...selector,
       '--json',
-      'number,title,state,url,isDraft,baseRefName,mergeable,body',
+      'number,title,state,url,isDraft,baseRefName,mergeable,statusCheckRollup,body',
     ],
     cwd,
   );
@@ -80,10 +86,16 @@ export function prThemeIcon(state: string, isDraft: boolean): vscode.ThemeIcon {
 
 /** What the webview currently shows, kept for resolving button messages. */
 interface PrViewState {
-  folderUri: string;
   cwd: string;
   lookup: PrLookup;
   createUrl?: string;
+}
+
+/** The `data-vscode-context` payload the "…" button's menu commands receive. */
+interface PrMenuContext {
+  cwd: string;
+  prNumber: number;
+  prTitle: string;
 }
 
 /** Description files opened for editing, keyed by fsPath — save publishes. */
@@ -91,23 +103,20 @@ type PendingEdits = Map<string, { cwd: string; number: number }>;
 
 /** Sets up the Pull Request view, its commands, and the save-to-publish hook. */
 export function registerPrView(context: vscode.ExtensionContext, store: LayoutStore): void {
-  const provider = new PrWebviewProvider(store);
+  const provider = new PrWebviewProvider(store, context.extensionUri);
   const pendingEdits: PendingEdits = new Map();
 
   context.subscriptions.push(
     provider,
     vscode.window.registerWebviewViewProvider('tab-manager.worktreePr', provider),
     vscode.commands.registerCommand(PR_COMMANDS.refresh, () => provider.refresh()),
-    vscode.commands.registerCommand(PR_COMMANDS.link, (worktree: WorktreeElement) =>
-      linkPr(store, worktree),
+    // Both are invoked from the webview's native "…" context menu, which
+    // passes the button's `data-vscode-context` object as the sole argument.
+    vscode.commands.registerCommand(PR_COMMANDS.editTitle, (menu: PrMenuContext) =>
+      editTitle(menu.cwd, menu.prNumber, menu.prTitle, provider),
     ),
-    vscode.commands.registerCommand(
-      PR_COMMANDS.editTitle,
-      (folderUri: string, cwd: string, prNumber: number, currentTitle: string) =>
-        editTitle(store, folderUri, cwd, prNumber, currentTitle, provider),
-    ),
-    vscode.commands.registerCommand(PR_COMMANDS.editDescription, (cwd: string, prNumber: number) =>
-      editDescription(context, cwd, prNumber, pendingEdits),
+    vscode.commands.registerCommand(PR_COMMANDS.editDescription, (menu: PrMenuContext) =>
+      editDescription(context, menu.cwd, menu.prNumber, pendingEdits),
     ),
     vscode.workspace.onDidSaveTextDocument((document) =>
       publishSavedDescription(document, pendingEdits),
@@ -118,8 +127,8 @@ export function registerPrView(context: vscode.ExtensionContext, store: LayoutSt
 /**
  * The "Pull Request" view — a webview, because tree rows have no typography
  * control and the PR title should be big and fully wrapped. Shows the active
- * worktree's PR (manually linked via "Link with PR…", else looked up from
- * the branch) with actions to open, rename, and rewrite its description.
+ * worktree's PR (looked up from its branch via `gh`) with actions to open,
+ * rename, and rewrite its description.
  */
 class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private readonly views = new Set<vscode.WebviewView>();
@@ -127,7 +136,10 @@ class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable
   private stateSignature: string;
   private lastState: PrViewState | undefined;
 
-  constructor(private readonly store: LayoutStore) {
+  constructor(
+    private readonly store: LayoutStore,
+    private readonly extensionUri: vscode.Uri,
+  ) {
     this.stateSignature = this.signature();
     this.subscription = store.onDidChange(() => {
       const signature = this.signature();
@@ -139,9 +151,7 @@ class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable
   }
 
   private signature(): string {
-    const active = this.store.activeFolderUri;
-    const linked = active ? this.store.linkedPr(active) : undefined;
-    return `${active}|${linked?.number}|${linked?.title}`;
+    return `${this.store.activeFolderUri}`;
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -162,9 +172,12 @@ class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable
     }
     const state = await this.computeState();
     this.lastState = state;
-    const html = renderHtml(state);
     for (const view of this.views) {
-      view.webview.html = html;
+      // VS Code's own icon font, mapped to a webview-servable URI per view.
+      const codiconsUri = view.webview.asWebviewUri(
+        vscode.Uri.joinPath(this.extensionUri, 'node_modules', '@vscode/codicons', 'dist', 'codicon.css'),
+      );
+      view.webview.html = renderHtml(state, codiconsUri.toString());
     }
   }
 
@@ -174,13 +187,9 @@ class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable
       return undefined;
     }
     const cwd = vscode.Uri.parse(folderUri).fsPath;
-    const lookup = await lookUpPr(cwd, this.store.linkedPr(folderUri)?.number);
-    if (lookup.kind === 'pr' && this.store.linkedPr(folderUri)?.number === lookup.pr.number) {
-      // Keep the Layouts row (which displays the linked PR's title) fresh.
-      void this.store.setLinkedPrTitle(folderUri, lookup.pr.title);
-    }
+    const lookup = await lookUpPr(cwd);
     const createUrl = lookup.kind === 'none' ? await compareUrl(cwd) : undefined;
-    return { folderUri, cwd, lookup, createUrl };
+    return { cwd, lookup, createUrl };
   }
 
   private onMessage(message: { type: string }): void {
@@ -195,26 +204,11 @@ class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable
           void vscode.commands.executeCommand('vscode.open', vscode.Uri.parse(pr.url));
         }
         break;
-      case 'more':
-        if (pr) {
-          void showMoreActions(state, pr);
-        }
-        break;
       case 'create':
         if (state.createUrl) {
           void vscode.commands.executeCommand('vscode.open', vscode.Uri.parse(state.createUrl));
         }
         break;
-      case 'link': {
-        const worktree: WorktreeElement = {
-          folderUri: state.folderUri,
-          name: path.basename(state.cwd),
-          isOpen: true,
-          isRoot: false,
-        };
-        void vscode.commands.executeCommand(PR_COMMANDS.link, worktree);
-        break;
-      }
     }
   }
 
@@ -223,34 +217,20 @@ class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable
   }
 }
 
-// GitHub octicons (16px), colored to match the tree icons via VS Code's chart
-// CSS variables so the badge tracks the active theme.
-const SVG_OPEN =
-  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z"/></svg>';
-const SVG_DRAFT =
-  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.25 1A2.25 2.25 0 0 1 4 5.372v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.251 2.251 0 0 1 3.25 1Zm9.5 14a2.25 2.25 0 1 1 0-4.5 2.25 2.25 0 0 1 0 4.5ZM2.5 3.25a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0ZM3.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm9.5 0a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM14 7.5a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0ZM12.75 3a1.25 1.25 0 1 1 0 2.5 1.25 1.25 0 0 1 0-2.5Z"/></svg>';
-const SVG_MERGED =
-  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.45 5.154A4.25 4.25 0 0 0 9.25 7.5h1.378a2.251 2.251 0 1 1 0 1.5H9.25A5.734 5.734 0 0 1 5 7.123v3.505a2.25 2.25 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.95-.218ZM4.25 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm8.5-4.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z"/></svg>';
-const SVG_CLOSED =
-  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.25 1A2.25 2.25 0 0 1 4 5.372v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.251 2.251 0 0 1 3.25 1Zm9.5 5.5a.75.75 0 0 1 .75.75v3.378a2.251 2.251 0 1 1-1.5 0V7.25a.75.75 0 0 1 .75-.75Zm-2.03-5.273a.75.75 0 0 1 1.06 0l.97.97.97-.97a.749.749 0 0 1 1.275.326.749.749 0 0 1-.215.734l-.97.97.97.97a.751.751 0 0 1-.018 1.042.751.751 0 0 1-1.042.018l-.97-.97-.97.97a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734l.97-.97-.97-.97a.75.75 0 0 1 0-1.06ZM2.5 3.25a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0ZM3.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm9.5 0a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z"/></svg>';
-// Octicons "check" and "alert" (16px), for the merge-conflict indicator.
-const SVG_CHECK =
-  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></svg>';
-const SVG_ALERT =
-  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"/></svg>';
-// Codicon "ellipsis" (16px) — VS Code's standard "More Actions…" toolbar icon.
-const SVG_ELLIPSIS =
-  '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="2.5" cy="8" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="13.5" cy="8" r="1.5"/></svg>';
+/** An inline VS Code codicon (the same icon font the editor itself uses). */
+function codicon(name: string): string {
+  return `<span class="codicon codicon-${name}" aria-hidden="true"></span>`;
+}
 
-/** Icon, label, and color per PR state for the webview badge. */
-const PR_WEB_BADGE: Record<PrVisualState, { label: string; color: string; svg: string }> = {
-  open: { label: 'Open', color: 'var(--vscode-charts-green)', svg: SVG_OPEN },
-  draft: { label: 'Draft', color: 'var(--vscode-descriptionForeground)', svg: SVG_DRAFT },
-  merged: { label: 'Merged', color: 'var(--vscode-charts-purple)', svg: SVG_MERGED },
-  closed: { label: 'Closed', color: 'var(--vscode-charts-red)', svg: SVG_CLOSED },
+/** Label and color per PR state for the webview badge (icon: PR_TREE_ICON). */
+const PR_WEB_BADGE: Record<PrVisualState, { label: string; color: string }> = {
+  open: { label: 'Open', color: 'var(--vscode-charts-green)' },
+  draft: { label: 'Draft', color: 'var(--vscode-descriptionForeground)' },
+  merged: { label: 'Merged', color: 'var(--vscode-charts-purple)' },
+  closed: { label: 'Closed', color: 'var(--vscode-charts-red)' },
 };
 
-function renderHtml(state: PrViewState | undefined): string {
+function renderHtml(state: PrViewState | undefined, codiconsHref: string): string {
   let content: string;
   if (!state) {
     content = `<p class="muted">Click a worktree in the Layouts section to see its pull request.</p>`;
@@ -258,39 +238,48 @@ function renderHtml(state: PrViewState | undefined): string {
     content = `<p class="muted">GitHub CLI (gh) not found — <code>brew install gh</code>.</p>`;
   } else if (state.lookup.kind === 'none') {
     const create = state.createUrl
-      ? `<button class="secondary" data-cmd="create">Create PR…</button>`
+      ? `<div class="actions"><button class="primary" data-cmd="create">Create PR…</button></div>`
       : '';
     content = `
       <p class="muted">No pull request for this worktree yet.</p>
-      <div class="actions">
-        <button class="primary" data-cmd="link">Link to PR…</button>
-        ${create}
-      </div>`;
+      ${create}`;
   } else {
     const pr = state.lookup.pr;
-    const badge = PR_WEB_BADGE[prVisualState(pr.state, pr.isDraft)];
+    const visual = prVisualState(pr.state, pr.isDraft);
+    const badge = PR_WEB_BADGE[visual];
+    const mergeability = renderMergeability(pr);
+    const checks = renderChecks(pr);
+    // The "…" button opens a native context menu (contributed under
+    // `webview/context` in package.json); its data-vscode-context payload is
+    // what the menu's commands receive.
+    const menuContext: PrMenuContext = { cwd: state.cwd, prNumber: pr.number, prTitle: pr.title };
     content = `
       <div class="title">${escapeHtml(pr.title)}</div>
       <div class="meta">
-        <span class="state" style="color: ${badge.color}">${badge.svg}${badge.label}</span>
+        <span class="state" style="color: ${badge.color}">${codicon(PR_TREE_ICON[visual].codicon)}${badge.label}</span>
         <span class="num">#${pr.number}</span>
-        ${renderMergeability(pr)}
       </div>
+      ${mergeability ? `<div class="meta">${mergeability}</div>` : ''}
+      ${checks ? `<div class="meta">${checks}</div>` : ''}
       <div class="actions">
         <button class="primary" data-cmd="open">Open on GitHub</button>
-        <button class="icon-button" data-cmd="more" aria-label="More actions">${SVG_ELLIPSIS}</button>
+        <button class="icon-button" id="more" aria-label="More actions"
+          data-vscode-context="${escapeHtml(JSON.stringify({ webviewSection: 'prActions', preventDefaultContextMenuItems: true, ...menuContext }))}"
+        >${codicon('ellipsis')}</button>
       </div>
       <div class="description">${renderMarkdown(pr.body)}</div>`;
   }
 
   return `<!DOCTYPE html>
 <html>
-<head><style>
+<head>
+<link rel="stylesheet" href="${codiconsHref}">
+<style>
   body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 8px 12px; }
   .title { font-size: 1.35em; font-weight: 600; line-height: 1.35; word-wrap: break-word; }
   .meta { margin-top: 6px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .state { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; }
-  .state svg { width: 14px; height: 14px; fill: currentColor; }
+  .state .codicon { font-size: 14px; }
   .num { opacity: 0.75; }
   .muted { opacity: 0.75; }
   .description { margin-top: 12px; line-height: 1.5; word-wrap: break-word; }
@@ -321,7 +310,6 @@ function renderHtml(state: PrViewState | undefined): string {
     color: var(--vscode-icon-foreground); background: transparent; border-radius: 5px;
   }
   button.icon-button:hover { background: var(--vscode-toolbar-hoverBackground); }
-  button.icon-button svg { width: 16px; height: 16px; fill: currentColor; }
   code { font-family: var(--vscode-editor-font-family); }
 </style></head>
 <body>
@@ -331,6 +319,14 @@ function renderHtml(state: PrViewState | undefined): string {
     for (const button of document.querySelectorAll('button[data-cmd]')) {
       button.addEventListener('click', () => api.postMessage({ type: button.dataset.cmd }));
     }
+    // A left-click on "…" opens the button's native context menu (VS Code
+    // builds it from the data-vscode-context attribute).
+    document.getElementById('more')?.addEventListener('click', (event) => {
+      event.currentTarget.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true, clientX: event.clientX, clientY: event.clientY,
+      }));
+      event.stopPropagation();
+    });
   </script>
 </body>
 </html>`;
@@ -348,12 +344,51 @@ function renderMergeability(pr: PrInfo): string {
   }
   const mergeable = pr.mergeable?.toUpperCase();
   if (mergeable === 'CONFLICTING') {
-    return `<span class="state" style="color: var(--vscode-charts-red)">${SVG_ALERT}Conflicts with ${escapeHtml(pr.baseRefName)}</span>`;
+    return `<span class="state" style="color: var(--vscode-charts-red)">${codicon('warning')}Conflicts with ${escapeHtml(pr.baseRefName)}</span>`;
   }
   if (mergeable === 'MERGEABLE') {
-    return `<span class="state" style="color: var(--vscode-charts-green)">${SVG_CHECK}No conflicts</span>`;
+    return `<span class="state" style="color: var(--vscode-charts-green)">${codicon('check')}No conflicts</span>`;
   }
   return '';
+}
+
+// gh's per-check outcomes, folded into pass/fail; anything else (QUEUED,
+// IN_PROGRESS, PENDING, EXPECTED, empty-while-running) counts as pending.
+const CHECK_PASS = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
+const CHECK_FAIL = new Set(['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED', 'STARTUP_FAILURE']);
+
+/**
+ * The CI-checks line under the merge indicator: red X when any check failed,
+ * a spinner while checks are running, green check when all passed. Empty for
+ * merged/closed PRs and PRs with no checks at all.
+ */
+function renderChecks(pr: PrInfo): string {
+  const visual = prVisualState(pr.state, pr.isDraft);
+  if (visual === 'merged' || visual === 'closed') {
+    return '';
+  }
+  const rollup = pr.statusCheckRollup ?? [];
+  if (rollup.length === 0) {
+    return '';
+  }
+  let passed = 0;
+  let failed = 0;
+  for (const check of rollup) {
+    const outcome = (check.conclusion || check.state || check.status || '').toUpperCase();
+    if (CHECK_PASS.has(outcome)) {
+      passed++;
+    } else if (CHECK_FAIL.has(outcome)) {
+      failed++;
+    }
+  }
+  const pending = rollup.length - passed - failed;
+  if (failed > 0) {
+    return `<span class="state" style="color: var(--vscode-charts-red)">${codicon('x')}${failed} of ${rollup.length} checks failed</span>`;
+  }
+  if (pending > 0) {
+    return `<span class="state" style="color: var(--vscode-charts-yellow)">${codicon('loading codicon-modifier-spin')}Checks running (${passed}/${rollup.length})</span>`;
+  }
+  return `<span class="state" style="color: var(--vscode-charts-green)">${codicon('check')}All checks passed</span>`;
 }
 
 function escapeHtml(text: string): string {
@@ -451,12 +486,9 @@ function renderMarkdown(markdown: string): string {
  * when there's no PR (or `gh` fails); failures are logged, not surfaced,
  * since this runs speculatively for every worktree row.
  */
-export async function resolveWorktreePr(
-  cwd: string,
-  linkedNumber: number | undefined,
-): Promise<PrInfo | undefined> {
+export async function resolveWorktreePr(cwd: string): Promise<PrInfo | undefined> {
   try {
-    return await fetchPr(cwd, linkedNumber);
+    return await fetchPr(cwd);
   } catch (error) {
     log(`tree: pr lookup failed for ${cwd}: ${errorMessage(error)}`);
     return undefined;
@@ -483,92 +515,7 @@ export async function listOpenPrs(cwd: string): Promise<OpenPr[]> {
   }
 }
 
-/** Right-click "Link with PR…": pick from open PRs, type a number, or unlink. */
-async function linkPr(store: LayoutStore, worktree: WorktreeElement): Promise<void> {
-  if (worktree.isRoot) {
-    vscode.window.showWarningMessage("The repo's main checkout can't be linked to a PR.");
-    return;
-  }
-  const cwd = vscode.Uri.parse(worktree.folderUri).fsPath;
-  const current = store.linkedPr(worktree.folderUri);
-
-  const ENTER_NUMBER = '$(edit) Enter a PR number…';
-  const UNLINK = `$(x) Unlink PR #${current?.number}`;
-  const picks: vscode.QuickPickItem[] = (await listOpenPrs(cwd)).map((pr) => ({
-    label: `#${pr.number} ${pr.title}`,
-    description: pr.headRefName,
-  }));
-  const extras: vscode.QuickPickItem[] = [{ label: ENTER_NUMBER }];
-  if (current !== undefined) {
-    extras.push({ label: UNLINK });
-  }
-
-  const choice = await vscode.window.showQuickPick([...picks, ...extras], {
-    placeHolder: `Link "${worktree.name}" with a pull request`,
-    matchOnDescription: true,
-  });
-  if (!choice) {
-    return;
-  }
-
-  if (choice.label === UNLINK) {
-    await store.setLinkedPr(worktree.folderUri, undefined);
-    return;
-  }
-  let prNumber: number | undefined;
-  let prTitle: string | undefined;
-  if (choice.label === ENTER_NUMBER) {
-    const input = await vscode.window.showInputBox({
-      prompt: 'Pull request number',
-      validateInput: (value) => (/^\d+$/.test(value.trim()) ? undefined : 'Enter a number'),
-    });
-    prNumber = input ? Number(input.trim()) : undefined;
-    // Title is backfilled by the Pull Request view on its next lookup.
-  } else {
-    prNumber = Number(/^#(\d+)/.exec(choice.label)?.[1]);
-    prTitle = choice.label.replace(/^#\d+\s*/, '');
-  }
-  if (prNumber === undefined || Number.isNaN(prNumber)) {
-    return;
-  }
-  const conflictingFolderUri = store.folderLinkedToPr(prNumber, worktree.folderUri);
-  if (conflictingFolderUri !== undefined) {
-    const conflictingName = path.basename(vscode.Uri.parse(conflictingFolderUri).fsPath);
-    vscode.window.showWarningMessage(
-      `PR #${prNumber} is already linked to "${conflictingName}". Unlink it there first.`,
-    );
-    return;
-  }
-  await store.setLinkedPr(worktree.folderUri, { number: prNumber, title: prTitle });
-  vscode.window.showInformationMessage(`Linked "${worktree.name}" with PR #${prNumber}.`);
-}
-
-/** The webview's "…" overflow button: a native quick-pick, like elsewhere in the extension. */
-async function showMoreActions(state: PrViewState, pr: PrInfo): Promise<void> {
-  const RENAME = '$(edit) Rename…';
-  const EDIT_DESCRIPTION = '$(note) Edit description…';
-  const choice = await vscode.window.showQuickPick(
-    [{ label: RENAME }, { label: EDIT_DESCRIPTION }],
-    {
-      placeHolder: `PR #${pr.number} actions`,
-    },
-  );
-  if (choice?.label === RENAME) {
-    void vscode.commands.executeCommand(
-      PR_COMMANDS.editTitle,
-      state.folderUri,
-      state.cwd,
-      pr.number,
-      pr.title,
-    );
-  } else if (choice?.label === EDIT_DESCRIPTION) {
-    void vscode.commands.executeCommand(PR_COMMANDS.editDescription, state.cwd, pr.number);
-  }
-}
-
 async function editTitle(
-  store: LayoutStore,
-  folderUri: string,
   cwd: string,
   prNumber: number,
   currentTitle: string,
@@ -584,9 +531,6 @@ async function editTitle(
   }
   try {
     await gh(['pr', 'edit', String(prNumber), '--title', title.trim()], cwd);
-    if (store.linkedPr(folderUri)?.number === prNumber) {
-      await store.setLinkedPrTitle(folderUri, title.trim());
-    }
     vscode.window.showInformationMessage(`Renamed PR #${prNumber}.`);
     provider.refresh();
   } catch (error) {
@@ -641,9 +585,9 @@ async function publishSavedDescription(
   }
 }
 
-async function lookUpPr(cwd: string, linkedNumber: number | undefined): Promise<PrLookup> {
+async function lookUpPr(cwd: string): Promise<PrLookup> {
   try {
-    return { kind: 'pr', pr: await fetchPr(cwd, linkedNumber) };
+    return { kind: 'pr', pr: await fetchPr(cwd) };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { kind: 'no-gh' };

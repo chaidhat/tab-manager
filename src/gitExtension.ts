@@ -6,6 +6,8 @@ import * as vscode from 'vscode';
  */
 interface Change {
   readonly uri: vscode.Uri;
+  /** For renames: the file's previous path. Equals `uri` otherwise. */
+  readonly originalUri: vscode.Uri;
   /** A `Status` enum value from the Git extension's `git.d.ts`. */
   readonly status: number;
 }
@@ -70,28 +72,42 @@ export async function ensureRepositoryOpen(folderUri: vscode.Uri): Promise<void>
 }
 
 /** How a file differs from the compare base. */
-export type FileChangeKind = 'added' | 'modified' | 'deleted';
+export type FileChangeKind = 'added' | 'modified' | 'deleted' | 'renamed';
+
+/** One changed file's kind, plus its old path when the change is a rename. */
+export interface FileChange {
+  kind: FileChangeKind;
+  /** For renames: the file's path at the compare base. */
+  originalUri?: vscode.Uri;
+}
 
 // Subsets of the Git extension's `Status` enum: INDEX_ADDED, INDEX_COPIED,
 // UNTRACKED, INTENT_TO_ADD are "added"; INDEX_DELETED, DELETED are "deleted";
-// everything else (modified, renamed, type-changed…) renders as "modified".
+// INDEX_RENAMED, INTENT_TO_RENAME are "renamed"; everything else (modified,
+// type-changed…) renders as "modified".
 const ADDED_STATUSES = new Set([1, 4, 7, 9]);
 const DELETED_STATUSES = new Set([2, 6]);
+const RENAMED_STATUSES = new Set([3, 10]);
 
-function changeKind(status: number): FileChangeKind {
-  return ADDED_STATUSES.has(status)
-    ? 'added'
-    : DELETED_STATUSES.has(status)
-      ? 'deleted'
-      : 'modified';
+function toFileChange(change: Change): FileChange {
+  if (RENAMED_STATUSES.has(change.status)) {
+    return { kind: 'renamed', originalUri: change.originalUri };
+  }
+  if (ADDED_STATUSES.has(change.status)) {
+    return { kind: 'added' };
+  }
+  if (DELETED_STATUSES.has(change.status)) {
+    return { kind: 'deleted' };
+  }
+  return { kind: 'modified' };
 }
 
 /** Files changed vs a branch, plus the ref they were compared against. */
 export interface BranchComparison {
   /** The merge-base ref the diff was taken against (falls back to the branch). */
   base: string;
-  /** Every changed file, keyed by fsPath. */
-  files: Map<string, FileChangeKind>;
+  /** Every changed file, keyed by fsPath (renames keyed by their new path). */
+  files: Map<string, FileChange>;
 }
 
 /**
@@ -113,9 +129,9 @@ export async function changedFilesVsBranch(
     // diffWith covers everything vs the base except untracked files, and its
     // statuses are already relative to the base — so it wins over the
     // working-tree lists, which are relative to HEAD.
-    const files = new Map<string, FileChangeKind>();
+    const files = new Map<string, FileChange>();
     for (const change of await repository.diffWith(base)) {
-      files.set(change.uri.fsPath, changeKind(change.status));
+      files.set(change.uri.fsPath, toFileChange(change));
     }
     const workingTree = [
       ...repository.state.workingTreeChanges,
@@ -123,7 +139,7 @@ export async function changedFilesVsBranch(
     ];
     for (const change of workingTree) {
       if (!files.has(change.uri.fsPath)) {
-        files.set(change.uri.fsPath, changeKind(change.status));
+        files.set(change.uri.fsPath, toFileChange(change));
       }
     }
     return { base, files };

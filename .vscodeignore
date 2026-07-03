@@ -8,3 +8,5 @@ node_modules/**
 tsconfig.json
 .gitignore
 **/*.vsix
+!node_modules/@vscode/codicons/dist/codicon.css
+!node_modules/@vscode/codicons/dist/codicon.ttf

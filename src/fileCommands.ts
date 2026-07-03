@@ -80,8 +80,9 @@ export function registerFileCommands(context: vscode.ExtensionContext, store: La
 
 /**
  * Opens `uri` as a diff against its content at `baseRef` (the compare
- * branch's merge-base). A deleted file has no working-tree side to diff, so
- * it opens read-only as it existed at the ref instead. Falls back to a plain
+ * branch's merge-base). A renamed file diffs against `originalUri` — its
+ * path at the base. A deleted file has no working-tree side to diff, so it
+ * opens read-only as it existed at the ref instead. Falls back to a plain
  * open if the Git extension can't serve the ref content.
  */
 async function openDiff(
@@ -89,8 +90,9 @@ async function openDiff(
   baseRef: string,
   branchLabel: string,
   deleted = false,
+  originalUri?: vscode.Uri,
 ): Promise<void> {
-  const atBase = await gitUriAtRef(uri, baseRef);
+  const atBase = await gitUriAtRef(originalUri ?? uri, baseRef);
   if (!atBase) {
     if (!deleted) {
       await vscode.commands.executeCommand('vscode.open', uri);

@@ -6,6 +6,7 @@ import { FileEntry, listDirectory } from './files';
 import {
   changedFilesVsBranch,
   ensureRepositoryOpen,
+  FileChange,
   FileChangeKind,
   onRepositoryStateChanged,
 } from './gitExtension';
@@ -37,6 +38,11 @@ const STATUS_DECORATION: Record<FileChangeKind, vscode.FileDecoration> = {
     'D',
     'Deleted (exists in the base branch)',
     new vscode.ThemeColor('gitDecoration.deletedResourceForeground'),
+  ),
+  renamed: new vscode.FileDecoration(
+    'R',
+    'Renamed since the base branch',
+    new vscode.ThemeColor('gitDecoration.renamedResourceForeground'),
   ),
 };
 
@@ -78,7 +84,7 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   private repoSubscription: vscode.Disposable | undefined;
   private repoRefreshTimer: ReturnType<typeof setTimeout> | undefined;
-  private changedFiles: Map<string, FileChangeKind> | undefined;
+  private changedFiles: Map<string, FileChange> | undefined;
   private changedDirs: Set<string> | undefined;
   /** The view handle, for the "Files Changed (N)" title. */
   private view: vscode.TreeView<FilesElement> | undefined;
@@ -87,16 +93,31 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
   private compareLabel: string | undefined;
   private warnedFilterKey: string | undefined;
   // Both caches avoid re-spawning `gh`/`git` on every re-render; keyed so a
-  // different root (or re-linked PR) recomputes.
+  // different root recomputes.
   private cachedCompareRef: { key: string; ref: string | undefined } | undefined;
   private detectedDefault: { root: string; branch: string | undefined } | undefined;
+
+  // Whether directory rows default to expanded (the view-title toggle). The
+  // generation is baked into row ids so each toggle defeats VS Code's
+  // remembered per-id expansion state and the new default applies everywhere.
+  private expandAll = false;
+  private expandGeneration = 0;
 
   constructor(private readonly store: LayoutStore) {
     this.subscription = store.onDidChange(() => this.onStoreChange());
     this.applyStoreState();
+    void vscode.commands.executeCommand('setContext', 'tabManager.filesExpanded', false);
   }
 
   refresh(): void {
+    this.emitter.fire();
+  }
+
+  /** The view-title collapse-all/expand-all toggle. */
+  setExpandAll(expanded: boolean): void {
+    this.expandAll = expanded;
+    this.expandGeneration++;
+    void vscode.commands.executeCommand('setContext', 'tabManager.filesExpanded', expanded);
     this.emitter.fire();
   }
 
@@ -124,9 +145,7 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
   }
 
   private signature(): string {
-    const active = this.store.activeFolderUri;
-    const linked = active ? this.store.linkedPr(active)?.number : undefined;
-    return `${active}|${linked}`;
+    return `${this.store.activeFolderUri}`;
   }
 
   private applyStoreState(): void {
@@ -205,8 +224,8 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
       );
       // Deleted files are gone from disk, so the listing can't surface them —
       // synthesize their rows from the changed set.
-      for (const [fsPath, kind] of this.changedFiles) {
-        if (kind === 'deleted' && path.dirname(fsPath) === dirUri.fsPath) {
+      for (const [fsPath, change] of this.changedFiles) {
+        if (change.kind === 'deleted' && path.dirname(fsPath) === dirUri.fsPath) {
           filtered.push({
             uri: vscode.Uri.file(fsPath),
             name: path.basename(fsPath),
@@ -284,10 +303,9 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
    * is no PR.
    */
   private async compareRef(root: vscode.Uri): Promise<string | undefined> {
-    const linked = this.store.linkedPr(root.toString())?.number;
-    const key = `${root.toString()}|${linked}`;
+    const key = root.toString();
     if (this.cachedCompareRef?.key !== key) {
-      const pr = await resolveWorktreePr(root.fsPath, linked);
+      const pr = await resolveWorktreePr(root.fsPath);
       const ref = pr ? `origin/${pr.baseRefName}` : await this.defaultBranch(root);
       this.cachedCompareRef = { key, ref };
     }
@@ -337,31 +355,43 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
     const item = new vscode.TreeItem(
       node.name,
       node.isDirectory
-        ? vscode.TreeItemCollapsibleState.Collapsed
+        ? this.expandAll
+          ? vscode.TreeItemCollapsibleState.Expanded
+          : vscode.TreeItemCollapsibleState.Collapsed
         : vscode.TreeItemCollapsibleState.None,
     );
     item.resourceUri = node.uri;
     item.contextValue = node.isDirectory ? 'fileDirectory' : 'fileLeaf';
-    if (!node.isDirectory) {
-      const status = this.changedFiles?.get(node.uri.fsPath);
-      if (status) {
+    if (node.isDirectory) {
+      // See setExpandAll — the generation forces the default state to re-apply.
+      item.id = `${this.expandGeneration}:${node.uri.toString()}`;
+    } else {
+      const change = this.changedFiles?.get(node.uri.fsPath);
+      if (change) {
         // The marker query makes ChangedFileDecorationProvider badge the row.
-        item.resourceUri = node.uri.with({ query: `${STATUS_QUERY_KEY}=${status}` });
+        item.resourceUri = node.uri.with({ query: `${STATUS_QUERY_KEY}=${change.kind}` });
       }
-      // A modified file opens as a diff against the compare base. An added
-      // file has no base-side content to diff against, and a deleted file no
-      // working-tree side — those open the one version that exists. Files in
-      // the unfiltered fallback (diff unavailable) open normally too.
+      // A modified file opens as a diff against the compare base; a renamed
+      // file diffs against its old path there. An added file has no base-side
+      // content to diff against, and a deleted file no working-tree side —
+      // those open the one version that exists. Files in the unfiltered
+      // fallback (diff unavailable) open normally too.
       const branch = this.compareLabel;
-      const asDiff = this.compareBase !== undefined && branch !== undefined && status !== undefined;
+      const asDiff = this.compareBase !== undefined && branch !== undefined && change !== undefined;
       // preview: false — a preview tab would be REPLACED by the next click,
       // making it impossible to build a stack of tabs from this view.
       item.command =
-        asDiff && status !== 'added'
+        asDiff && change.kind !== 'added'
           ? {
               command: OPEN_DIFF,
               title: 'Open Diff',
-              arguments: [node.uri, this.compareBase, branch, status === 'deleted'],
+              arguments: [
+                node.uri,
+                this.compareBase,
+                branch,
+                change.kind === 'deleted',
+                change.originalUri,
+              ],
             }
           : {
               command: 'vscode.open',

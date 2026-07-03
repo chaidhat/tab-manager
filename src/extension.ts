@@ -36,9 +36,17 @@ export function activate(context: vscode.ExtensionContext): void {
     filesView,
     vscode.window.registerFileDecorationProvider(new ChangedFileDecorationProvider()),
     vscode.window.registerTreeDataProvider('tab-manager.layouts', worktreesProvider),
+    // The Files view's title toggle — one of the two shows at a time, gated
+    // on the tabManager.filesExpanded context key.
+    vscode.commands.registerCommand('tabManager.filesExpandAll', () =>
+      changedFilesProvider.setExpandAll(true),
+    ),
+    vscode.commands.registerCommand('tabManager.filesCollapseAll', () =>
+      changedFilesProvider.setExpandAll(false),
+    ),
   );
 
-  registerCommands(context, store, () => worktreesProvider.refresh());
+  registerCommands(context, () => worktreesProvider.refresh());
   registerFileCommands(context, store);
   registerPrView(context, store);
 }

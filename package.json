@@ -164,19 +164,26 @@
         "icon": "$(refresh)"
       },
       {
-        "command": "tabManager.linkPr",
-        "title": "Link with PR...",
-        "category": "Tab Manager"
-      },
-      {
         "command": "tabManager.editPrTitle",
-        "title": "Rename PR...",
+        "title": "Rename...",
         "category": "Tab Manager"
       },
       {
         "command": "tabManager.editPrDescription",
-        "title": "Edit PR Description...",
+        "title": "Edit Description...",
         "category": "Tab Manager"
+      },
+      {
+        "command": "tabManager.filesExpandAll",
+        "title": "Expand All Files",
+        "category": "Tab Manager",
+        "icon": "$(expand-all)"
+      },
+      {
+        "command": "tabManager.filesCollapseAll",
+        "title": "Collapse All Files",
+        "category": "Tab Manager",
+        "icon": "$(collapse-all)"
       }
     ],
     "menus": {
@@ -185,6 +192,26 @@
           "command": "tabManager.refreshPr",
           "when": "view == tab-manager.worktreePr",
           "group": "navigation"
+        },
+        {
+          "command": "tabManager.filesExpandAll",
+          "when": "view == tab-manager.worktreeFiles && !tabManager.filesExpanded",
+          "group": "navigation"
+        },
+        {
+          "command": "tabManager.filesCollapseAll",
+          "when": "view == tab-manager.worktreeFiles && tabManager.filesExpanded",
+          "group": "navigation"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "tabManager.editPrTitle",
+          "when": "webviewId == 'tab-manager.worktreePr' && webviewSection == 'prActions'"
+        },
+        {
+          "command": "tabManager.editPrDescription",
+          "when": "webviewId == 'tab-manager.worktreePr' && webviewSection == 'prActions'"
         }
       ],
       "view/item/context": [
@@ -202,11 +229,6 @@
           "command": "tabManager.deleteWorktree",
           "when": "view == tab-manager.layouts && viewItem == worktree-closed",
           "group": "inline@2"
-        },
-        {
-          "command": "tabManager.linkPr",
-          "when": "view == tab-manager.layouts && (viewItem == worktree-open || viewItem == worktree-closed)",
-          "group": "1_link@2"
         },
         {
           "command": "tabManager.newFile",
@@ -327,10 +349,6 @@
           "when": "false"
         },
         {
-          "command": "tabManager.linkPr",
-          "when": "false"
-        },
-        {
           "command": "tabManager.copyWorktreePath",
           "when": "false"
         },
@@ -344,6 +362,14 @@
         },
         {
           "command": "tabManager.editPrTitle",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.filesExpandAll",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.filesCollapseAll",
           "when": "false"
         },
         {
@@ -388,5 +414,8 @@
     "prettier": "3.9.4",
     "typescript": "^5.4.0",
     "typescript-eslint": "8.62.1"
+  },
+  "dependencies": {
+    "@vscode/codicons": "^0.0.45"
   }
 }
