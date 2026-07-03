@@ -21,6 +21,8 @@ export interface PrInfo {
   isDraft: boolean;
   /** The branch the PR merges into — what changed files are diffed against. */
   baseRefName: string;
+  /** GitHub's merge check: MERGEABLE, CONFLICTING, or UNKNOWN (still computing). */
+  mergeable: string;
   body: string;
 }
 
@@ -34,7 +36,13 @@ type PrLookup = { kind: 'pr'; pr: PrInfo } | { kind: 'none' } | { kind: 'no-gh' 
 async function fetchPr(cwd: string, linkedNumber: number | undefined): Promise<PrInfo> {
   const selector = linkedNumber !== undefined ? [String(linkedNumber)] : [];
   const stdout = await gh(
-    ['pr', 'view', ...selector, '--json', 'number,title,state,url,isDraft,baseRefName,body'],
+    [
+      'pr',
+      'view',
+      ...selector,
+      '--json',
+      'number,title,state,url,isDraft,baseRefName,mergeable,body',
+    ],
     cwd,
   );
   return JSON.parse(stdout) as PrInfo;
@@ -225,6 +233,11 @@ const SVG_MERGED =
   '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.45 5.154A4.25 4.25 0 0 0 9.25 7.5h1.378a2.251 2.251 0 1 1 0 1.5H9.25A5.734 5.734 0 0 1 5 7.123v3.505a2.25 2.25 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.95-.218ZM4.25 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm8.5-4.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z"/></svg>';
 const SVG_CLOSED =
   '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.25 1A2.25 2.25 0 0 1 4 5.372v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.251 2.251 0 0 1 3.25 1Zm9.5 5.5a.75.75 0 0 1 .75.75v3.378a2.251 2.251 0 1 1-1.5 0V7.25a.75.75 0 0 1 .75-.75Zm-2.03-5.273a.75.75 0 0 1 1.06 0l.97.97.97-.97a.749.749 0 0 1 1.275.326.749.749 0 0 1-.215.734l-.97.97.97.97a.751.751 0 0 1-.018 1.042.751.751 0 0 1-1.042.018l-.97-.97-.97.97a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734l.97-.97-.97-.97a.75.75 0 0 1 0-1.06ZM2.5 3.25a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0ZM3.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm9.5 0a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z"/></svg>';
+// Octicons "check" and "alert" (16px), for the merge-conflict indicator.
+const SVG_CHECK =
+  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></svg>';
+const SVG_ALERT =
+  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"/></svg>';
 // Codicon "ellipsis" (16px) — VS Code's standard "More Actions…" toolbar icon.
 const SVG_ELLIPSIS =
   '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="2.5" cy="8" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="13.5" cy="8" r="1.5"/></svg>';
@@ -244,7 +257,9 @@ function renderHtml(state: PrViewState | undefined): string {
   } else if (state.lookup.kind === 'no-gh') {
     content = `<p class="muted">GitHub CLI (gh) not found — <code>brew install gh</code>.</p>`;
   } else if (state.lookup.kind === 'none') {
-    const create = state.createUrl ? `<button class="secondary" data-cmd="create">Create PR…</button>` : '';
+    const create = state.createUrl
+      ? `<button class="secondary" data-cmd="create">Create PR…</button>`
+      : '';
     content = `
       <p class="muted">No pull request for this worktree yet.</p>
       <div class="actions">
@@ -259,6 +274,7 @@ function renderHtml(state: PrViewState | undefined): string {
       <div class="meta">
         <span class="state" style="color: ${badge.color}">${badge.svg}${badge.label}</span>
         <span class="num">#${pr.number}</span>
+        ${renderMergeability(pr)}
       </div>
       <div class="actions">
         <button class="primary" data-cmd="open">Open on GitHub</button>
@@ -272,7 +288,7 @@ function renderHtml(state: PrViewState | undefined): string {
 <head><style>
   body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 8px 12px; }
   .title { font-size: 1.35em; font-weight: 600; line-height: 1.35; word-wrap: break-word; }
-  .meta { margin-top: 6px; display: flex; align-items: center; gap: 8px; }
+  .meta { margin-top: 6px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .state { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; }
   .state svg { width: 14px; height: 14px; fill: currentColor; }
   .num { opacity: 0.75; }
@@ -318,6 +334,26 @@ function renderHtml(state: PrViewState | undefined): string {
   </script>
 </body>
 </html>`;
+}
+
+/**
+ * The merge-conflict indicator next to the PR state: red alert when GitHub
+ * reports conflicts with the base branch, green check when clean. Empty for
+ * merged/closed PRs (moot) and while GitHub is still computing (UNKNOWN).
+ */
+function renderMergeability(pr: PrInfo): string {
+  const visual = prVisualState(pr.state, pr.isDraft);
+  if (visual === 'merged' || visual === 'closed') {
+    return '';
+  }
+  const mergeable = pr.mergeable?.toUpperCase();
+  if (mergeable === 'CONFLICTING') {
+    return `<span class="state" style="color: var(--vscode-charts-red)">${SVG_ALERT}Conflicts with ${escapeHtml(pr.baseRefName)}</span>`;
+  }
+  if (mergeable === 'MERGEABLE') {
+    return `<span class="state" style="color: var(--vscode-charts-green)">${SVG_CHECK}No conflicts</span>`;
+  }
+  return '';
 }
 
 function escapeHtml(text: string): string {
@@ -511,9 +547,12 @@ async function linkPr(store: LayoutStore, worktree: WorktreeElement): Promise<vo
 async function showMoreActions(state: PrViewState, pr: PrInfo): Promise<void> {
   const RENAME = '$(edit) Rename…';
   const EDIT_DESCRIPTION = '$(note) Edit description…';
-  const choice = await vscode.window.showQuickPick([{ label: RENAME }, { label: EDIT_DESCRIPTION }], {
-    placeHolder: `PR #${pr.number} actions`,
-  });
+  const choice = await vscode.window.showQuickPick(
+    [{ label: RENAME }, { label: EDIT_DESCRIPTION }],
+    {
+      placeHolder: `PR #${pr.number} actions`,
+    },
+  );
   if (choice?.label === RENAME) {
     void vscode.commands.executeCommand(
       PR_COMMANDS.editTitle,

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { registerCommands } from './commands';
 import { registerFileCommands } from './fileCommands';
-import { FilesTreeProvider } from './filesTree';
+import { ChangedFileDecorationProvider, FilesTreeProvider } from './filesTree';
 import { registerPrView } from './pr';
 import { LayoutStore } from './store';
 import { LayoutTreeProvider } from './tree';
@@ -22,11 +22,19 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   });
 
+  // createTreeView (not registerTreeDataProvider) so the provider can retitle
+  // the view with the changed-file count.
+  const filesView = vscode.window.createTreeView('tab-manager.worktreeFiles', {
+    treeDataProvider: changedFilesProvider,
+  });
+  changedFilesProvider.attachView(filesView);
+
   context.subscriptions.push(
     store,
     worktreesProvider,
     changedFilesProvider,
-    vscode.window.registerTreeDataProvider('tab-manager.worktreeFiles', changedFilesProvider),
+    filesView,
+    vscode.window.registerFileDecorationProvider(new ChangedFileDecorationProvider()),
     vscode.window.registerTreeDataProvider('tab-manager.layouts', worktreesProvider),
   );
 

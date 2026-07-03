@@ -6,6 +6,8 @@ import * as vscode from 'vscode';
  */
 interface Change {
   readonly uri: vscode.Uri;
+  /** A `Status` enum value from the Git extension's `git.d.ts`. */
+  readonly status: number;
 }
 
 interface RepositoryState {
@@ -67,12 +69,29 @@ export async function ensureRepositoryOpen(folderUri: vscode.Uri): Promise<void>
   await openRepository(folderUri);
 }
 
+/** How a file differs from the compare base. */
+export type FileChangeKind = 'added' | 'modified' | 'deleted';
+
+// Subsets of the Git extension's `Status` enum: INDEX_ADDED, INDEX_COPIED,
+// UNTRACKED, INTENT_TO_ADD are "added"; INDEX_DELETED, DELETED are "deleted";
+// everything else (modified, renamed, type-changed…) renders as "modified".
+const ADDED_STATUSES = new Set([1, 4, 7, 9]);
+const DELETED_STATUSES = new Set([2, 6]);
+
+function changeKind(status: number): FileChangeKind {
+  return ADDED_STATUSES.has(status)
+    ? 'added'
+    : DELETED_STATUSES.has(status)
+      ? 'deleted'
+      : 'modified';
+}
+
 /** Files changed vs a branch, plus the ref they were compared against. */
 export interface BranchComparison {
   /** The merge-base ref the diff was taken against (falls back to the branch). */
   base: string;
-  /** fsPaths of every changed file. */
-  files: Set<string>;
+  /** Every changed file, keyed by fsPath. */
+  files: Map<string, FileChangeKind>;
 }
 
 /**
@@ -91,14 +110,21 @@ export async function changedFilesVsBranch(
   }
   try {
     const base = (await repository.getMergeBase(branch, 'HEAD')) ?? branch;
-    const diff = await repository.diffWith(base);
-    const files = new Set<string>();
+    // diffWith covers everything vs the base except untracked files, and its
+    // statuses are already relative to the base — so it wins over the
+    // working-tree lists, which are relative to HEAD.
+    const files = new Map<string, FileChangeKind>();
+    for (const change of await repository.diffWith(base)) {
+      files.set(change.uri.fsPath, changeKind(change.status));
+    }
     const workingTree = [
       ...repository.state.workingTreeChanges,
       ...(repository.state.untrackedChanges ?? []),
     ];
-    for (const change of [...diff, ...workingTree]) {
-      files.add(change.uri.fsPath);
+    for (const change of workingTree) {
+      if (!files.has(change.uri.fsPath)) {
+        files.set(change.uri.fsPath, changeKind(change.status));
+      }
     }
     return { base, files };
   } catch {

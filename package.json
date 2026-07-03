@@ -53,7 +53,7 @@
         {
           "type": "tree",
           "id": "tab-manager.worktreeFiles",
-          "name": "Changed Files",
+          "name": "Files Changed",
           "when": "tabManager.isChildWorktree"
         }
       ]
