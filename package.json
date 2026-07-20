@@ -2,7 +2,7 @@
   "name": "tab-manager",
   "displayName": "Tab Manager",
   "description": "Worktree-centric window management: one window per worktree, with PR linking, creation from PRs, and changed-file diffs.",
-  "version": "0.2.8",
+  "version": "0.2.15",
   "publisher": "chaidhat",
   "license": "MIT",
   "repository": {
@@ -162,6 +162,12 @@
         "category": "Tab Manager"
       },
       {
+        "command": "tabManager.refreshWorktrees",
+        "title": "Refresh Worktrees",
+        "category": "Tab Manager",
+        "icon": "$(refresh)"
+      },
+      {
         "command": "tabManager.refreshPr",
         "title": "Refresh Pull Request",
         "category": "Tab Manager",
@@ -209,6 +215,11 @@
         }
       ],
       "view/title": [
+        {
+          "command": "tabManager.refreshWorktrees",
+          "when": "view == tab-manager.layouts",
+          "group": "navigation"
+        },
         {
           "command": "tabManager.refreshPr",
           "when": "view == tab-manager.worktreePr",

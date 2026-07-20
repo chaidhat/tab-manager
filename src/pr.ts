@@ -79,10 +79,37 @@ const PR_TREE_ICON: Record<PrVisualState, { codicon: string; color: string }> = 
   closed: { codicon: 'git-pull-request-closed', color: 'charts.red' },
 };
 
-/** A colored PR-state icon for a tree row. */
-export function prThemeIcon(state: string, isDraft: boolean): vscode.ThemeIcon {
-  const { codicon, color } = PR_TREE_ICON[prVisualState(state, isDraft)];
-  return new vscode.ThemeIcon(codicon, new vscode.ThemeColor(color));
+/** The `OPEN - ` / `MERGED - ` … prefix for a PR's tree-row label. */
+export function prStateLabel(state: PrVisualState): string {
+  return state.toUpperCase();
+}
+
+/**
+ * A tree-row icon: the PR number's digit-color strip (same palette as the PR
+ * view's top strip), one square swatch per digit in a row, sharing the 16×16
+ * icon box's width and vertically centered. The PR state is not part of the
+ * icon — the row's label carries it as an `OPEN - ` … prefix. Returned as an
+ * inline SVG data URI so no file needs to be written.
+ */
+export function prDigitStripIcon(prNumber: number): vscode.Uri {
+  const digits = String(prNumber).split('');
+  const side = 16 / digits.length;
+  const top = (16 - side) / 2;
+  const swatches = digits
+    .map(
+      (digit, i) =>
+        `<rect x="${(i * side).toFixed(3)}" y="${top.toFixed(3)}" ` +
+        `width="${side.toFixed(3)}" height="${side.toFixed(3)}" fill="${DIGIT_COLORS[digit]}"/>`,
+    )
+    .join('');
+  // The inset hairline keeps the white "0" and black "1" swatches visible on
+  // either theme, matching the PR view's strip.
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">` +
+    `${swatches}` +
+    `<rect x="0.25" y="${(top + 0.25).toFixed(3)}" width="15.5" ` +
+    `height="${(side - 0.5).toFixed(3)}" fill="none" stroke="#8888" stroke-width="0.5"/></svg>`;
+  return vscode.Uri.parse(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`);
 }
 
 /** What the webview currently shows, kept for resolving button messages. */
@@ -309,10 +336,11 @@ function renderHtml(state: PrViewState | undefined, codiconsHref: string): strin
 <link rel="stylesheet" href="${codiconsHref}">
 <style>
   body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 8px 12px; }
-  /* Negative margins cancel the body padding so the strip sits flush with the
-     view's top edge; the inset hairline keeps the white "0" swatch visible on
-     light themes (and black "1" on dark). */
-  .digits { display: flex; margin: -8px -12px 8px; }
+  /* Negative top/right margins cancel the body padding so the strip sits flush
+     with the view's top and right edges; the left edge keeps the body padding
+     so the swatches line up with the title text below. The inset hairline keeps
+     the white "0" swatch visible on light themes (and black "1" on dark). */
+  .digits { display: flex; margin: -8px -12px 8px 0; }
   .digit { width: 1em; height: 1em; box-shadow: inset 0 0 0 1px var(--vscode-panel-border); }
   .title { font-size: 1.35em; font-weight: 600; line-height: 1.35; word-wrap: break-word; }
   .meta { margin-top: 6px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

@@ -1,6 +1,13 @@
 import * as vscode from 'vscode';
 import { COMMANDS } from './commands';
-import { PrInfo, prThemeIcon, prVisualState, resolveWorktreePr, summarizeChecks } from './pr';
+import {
+  PrInfo,
+  prDigitStripIcon,
+  prStateLabel,
+  prVisualState,
+  resolveWorktreePr,
+  summarizeChecks,
+} from './pr';
 import { LayoutStore } from './store';
 import { WorktreeElement } from './types';
 import { currentBranch, groupFoldersByRepo } from './worktrees';
@@ -265,7 +272,11 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
     // lookup resolved for the worktree's branch.
     const resolved = this.prCache.get(worktree.folderUri);
     const prNumber = resolved?.number;
-    const label = resolved ? `#${resolved.number}: ${resolved.title}` : worktree.name;
+    // The PR state leads the label as text (`OPEN - #698: …`) — a 16×16 icon
+    // can't fit a legible state glyph next to the digit strip.
+    const label = resolved
+      ? `${prStateLabel(prVisualState(resolved.state, resolved.isDraft))} - #${resolved.number}: ${resolved.title}`
+      : worktree.name;
     // A PR with status lines (checks / conflicts) expands to show them. The
     // id changes when the rows appear because VS Code records collapse state
     // per id — reusing the pre-resolution id would leave the row unexpandable.
@@ -275,10 +286,10 @@ export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>,
       : vscode.TreeItemCollapsibleState.None;
     const item = new vscode.TreeItem(label, collapsible);
 
-    // A resolved PR gets a state-colored icon (open green, draft grey, merged
-    // purple, closed red).
+    // A resolved PR gets its digit-color strip as the icon — the same
+    // PR-number encoding shown atop the PR view.
     if (resolved) {
-      item.iconPath = prThemeIcon(resolved.state, resolved.isDraft);
+      item.iconPath = prDigitStripIcon(resolved.number);
     }
 
     item.id = hasStatus ? `worktree-pr:${worktree.folderUri}` : `worktree:${worktree.folderUri}`;

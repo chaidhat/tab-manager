@@ -44,6 +44,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('tabManager.filesCollapseAll', () =>
       changedFilesProvider.setExpandAll(false),
     ),
+    // The Worktrees view's title refresh — drops the PR/branch caches so rows
+    // re-query gh and pick up merged/renamed PRs.
+    vscode.commands.registerCommand('tabManager.refreshWorktrees', () =>
+      worktreesProvider.refresh(),
+    ),
   );
 
   registerCommands(context, () => worktreesProvider.refresh());
