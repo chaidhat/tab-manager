@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { errorMessage } from './cli';
 import { log } from './log';
-import { listOpenPrs } from './pr';
+import { listOpenPrs, resolveWorktreePr } from './pr';
 import type { RepoSection } from './tree';
 import { WorktreeElement } from './types';
 import {
@@ -82,13 +82,23 @@ async function switchWorktree(): Promise<void> {
   }
 
   const currentPath = folder.uri.fsPath;
-  const items = await Promise.all(
-    worktrees.map(async (worktree) => ({
-      label: worktree.name,
-      description: (await currentBranch(worktree.uri.fsPath)) ?? '',
-      detail: worktree.uri.fsPath === currentPath ? 'This window' : undefined,
-      uri: worktree.uri,
-    })),
+  // Each row shows the worktree's PR (via the same branch-based `gh` lookup
+  // the hub rows use), falling back to the branch when there's no PR. Passing
+  // the promise keeps the quick pick open with a busy bar while gh resolves.
+  const items = Promise.all(
+    worktrees.map(async (worktree) => {
+      const cwd = worktree.uri.fsPath;
+      const pr = await resolveWorktreePr(cwd);
+      const description = pr
+        ? `#${pr.number} ${pr.title}`
+        : ((await currentBranch(cwd)) ?? '');
+      return {
+        label: worktree.name,
+        description,
+        detail: cwd === currentPath ? 'This window' : undefined,
+        uri: worktree.uri,
+      };
+    }),
   );
   const pick = await vscode.window.showQuickPick(items, {
     placeHolder: 'Open another worktree in a new window…',
