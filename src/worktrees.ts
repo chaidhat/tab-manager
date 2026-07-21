@@ -197,7 +197,7 @@ export async function repoRootOf(folderUri: vscode.Uri): Promise<string | undefi
 }
 
 /** Subdirectories of `<repoRoot>/.claude/worktrees` that are git worktrees. */
-async function discoverClaudeWorktrees(repoRoot: string): Promise<FolderRef[]> {
+export async function discoverClaudeWorktrees(repoRoot: string): Promise<FolderRef[]> {
   const dir = vscode.Uri.file(path.join(repoRoot, CLAUDE_WORKTREES_DIR));
   let entries: [string, vscode.FileType][];
   try {

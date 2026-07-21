@@ -2,9 +2,17 @@ import * as vscode from 'vscode';
 import { errorMessage } from './cli';
 import { log } from './log';
 import { listOpenPrs } from './pr';
+import { LayoutStore } from './store';
 import type { RepoSection } from './tree';
 import { WorktreeElement } from './types';
-import { addWorktree, addWorktreeForPr, removeWorktree } from './worktrees';
+import {
+  addWorktree,
+  addWorktreeForPr,
+  currentBranch,
+  discoverClaudeWorktrees,
+  removeWorktree,
+  repoRootOf,
+} from './worktrees';
 
 /** Command ids, mirrored in `package.json` under `contributes.commands`. */
 export const COMMANDS = {
@@ -13,10 +21,12 @@ export const COMMANDS = {
   newWorktreeBlank: 'tabManager.newWorktreeBlank',
   newWorktreeFromPr: 'tabManager.newWorktreeFromPr',
   deleteWorktree: 'tabManager.deleteWorktree',
+  switchWorktree: 'tabManager.switchWorktree',
 } as const;
 
 export function registerCommands(
   context: vscode.ExtensionContext,
+  store: LayoutStore,
   refreshWorktrees: () => void,
 ): void {
   const register = (id: string, handler: (...args: never[]) => unknown) =>
@@ -46,6 +56,51 @@ export function registerCommands(
   register(COMMANDS.deleteWorktree, (worktree: WorktreeElement) =>
     deleteWorktree(worktree, refreshWorktrees),
   );
+  register(COMMANDS.switchWorktree, () => switchWorktree(store));
+}
+
+/**
+ * Retargets this window's Worktree views (Pull Request + Files Changed) at
+ * another of the super-repo's worktrees, picked from a quick pick. Only the
+ * views switch — the window keeps its own folder open. The views listen to
+ * the store, so they re-render with the picked worktree's PR (flags, merge
+ * conflicts, checks) and changed files immediately.
+ */
+async function switchWorktree(store: LayoutStore): Promise<void> {
+  const activeUri = store.activeFolderUri ?? vscode.workspace.workspaceFolders?.[0]?.uri.toString();
+  if (!activeUri) {
+    vscode.window.showWarningMessage('No active worktree to switch from.');
+    return;
+  }
+  const repoRoot = await repoRootOf(vscode.Uri.parse(activeUri));
+  if (!repoRoot) {
+    vscode.window.showWarningMessage('The active folder is not inside a git repository.');
+    return;
+  }
+
+  const worktrees = await discoverClaudeWorktrees(repoRoot);
+  if (worktrees.length === 0) {
+    vscode.window.showInformationMessage('No worktrees found under .claude/worktrees.');
+    return;
+  }
+
+  const activePath = vscode.Uri.parse(activeUri).fsPath;
+  const items = await Promise.all(
+    worktrees.map(async (worktree) => ({
+      label: worktree.name,
+      description: (await currentBranch(worktree.uri.fsPath)) ?? '',
+      detail: worktree.uri.fsPath === activePath ? 'Currently shown' : undefined,
+      uri: worktree.uri,
+    })),
+  );
+  const pick = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Show another worktree’s pull request and changed files…',
+    matchOnDescription: true,
+  });
+  if (!pick || pick.uri.fsPath === activePath) {
+    return;
+  }
+  await store.setActive(pick.uri.toString());
 }
 
 /**
