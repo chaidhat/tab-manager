@@ -2,7 +2,6 @@ import * as vscode from 'vscode';
 import { errorMessage } from './cli';
 import { log } from './log';
 import { listOpenPrs } from './pr';
-import { LayoutStore } from './store';
 import type { RepoSection } from './tree';
 import { WorktreeElement } from './types';
 import {
@@ -26,7 +25,6 @@ export const COMMANDS = {
 
 export function registerCommands(
   context: vscode.ExtensionContext,
-  store: LayoutStore,
   refreshWorktrees: () => void,
 ): void {
   const register = (id: string, handler: (...args: never[]) => unknown) =>
@@ -56,23 +54,22 @@ export function registerCommands(
   register(COMMANDS.deleteWorktree, (worktree: WorktreeElement) =>
     deleteWorktree(worktree, refreshWorktrees),
   );
-  register(COMMANDS.switchWorktree, () => switchWorktree(store));
+  register(COMMANDS.switchWorktree, () => switchWorktree());
 }
 
 /**
- * Retargets this window's Worktree views (Pull Request + Files Changed) at
- * another of the super-repo's worktrees, picked from a quick pick. Only the
- * views switch — the window keeps its own folder open. The views listen to
- * the store, so they re-render with the picked worktree's PR (flags, merge
- * conflicts, checks) and changed files immediately.
+ * Picks another of the super-repo's worktrees and opens it in its own new
+ * window — the same thing clicking a worktree row in the root hub does. That
+ * window activates as a child worktree window, so its Pull Request and Files
+ * Changed views show the picked worktree.
  */
-async function switchWorktree(store: LayoutStore): Promise<void> {
-  const activeUri = store.activeFolderUri ?? vscode.workspace.workspaceFolders?.[0]?.uri.toString();
-  if (!activeUri) {
-    vscode.window.showWarningMessage('No active worktree to switch from.');
+async function switchWorktree(): Promise<void> {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) {
+    vscode.window.showWarningMessage('No workspace folder open.');
     return;
   }
-  const repoRoot = await repoRootOf(vscode.Uri.parse(activeUri));
+  const repoRoot = await repoRootOf(folder.uri);
   if (!repoRoot) {
     vscode.window.showWarningMessage('The active folder is not inside a git repository.');
     return;
@@ -84,23 +81,23 @@ async function switchWorktree(store: LayoutStore): Promise<void> {
     return;
   }
 
-  const activePath = vscode.Uri.parse(activeUri).fsPath;
+  const currentPath = folder.uri.fsPath;
   const items = await Promise.all(
     worktrees.map(async (worktree) => ({
       label: worktree.name,
       description: (await currentBranch(worktree.uri.fsPath)) ?? '',
-      detail: worktree.uri.fsPath === activePath ? 'Currently shown' : undefined,
+      detail: worktree.uri.fsPath === currentPath ? 'This window' : undefined,
       uri: worktree.uri,
     })),
   );
   const pick = await vscode.window.showQuickPick(items, {
-    placeHolder: 'Show another worktree’s pull request and changed files…',
+    placeHolder: 'Open another worktree in a new window…',
     matchOnDescription: true,
   });
-  if (!pick || pick.uri.fsPath === activePath) {
+  if (!pick || pick.uri.fsPath === currentPath) {
     return;
   }
-  await store.setActive(pick.uri.toString());
+  await vscode.commands.executeCommand('vscode.openFolder', pick.uri, { forceNewWindow: true });
 }
 
 /**

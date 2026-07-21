@@ -51,7 +51,7 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
   );
 
-  registerCommands(context, store, () => worktreesProvider.refresh());
+  registerCommands(context, () => worktreesProvider.refresh());
   registerFileCommands(context, store);
   registerPrView(context, store);
 }
