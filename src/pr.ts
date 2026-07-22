@@ -319,7 +319,7 @@ function renderHtml(state: PrViewState | undefined, codiconsHref: string): strin
         <span class="state" style="color: ${badge.color}">${codicon(PR_TREE_ICON[visual].codicon)}${badge.label}</span>
         <span class="num">#${pr.number}</span>
       </div>
-      <div class="meta muted">${codicon('git-merge')}target: <code>${escapeHtml(pr.baseRefName)}</code></div>
+      <div class="meta muted">target: <code>${escapeHtml(pr.baseRefName)}</code></div>
       ${mergeability ? `<div class="meta">${mergeability}</div>` : ''}
       ${checks ? `<div class="meta">${checks}</div>` : ''}
       <div class="actions">
