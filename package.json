@@ -2,7 +2,7 @@
   "name": "tab-manager",
   "displayName": "Tab Manager",
   "description": "Worktree-centric window management: one window per worktree, with PR linking, creation from PRs, and changed-file diffs.",
-  "version": "0.2.19",
+  "version": "0.2.20",
   "publisher": "chaidhat",
   "license": "MIT",
   "repository": {
