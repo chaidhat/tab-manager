@@ -89,9 +89,7 @@ async function switchWorktree(): Promise<void> {
     worktrees.map(async (worktree) => {
       const cwd = worktree.uri.fsPath;
       const pr = await resolveWorktreePr(cwd);
-      const description = pr
-        ? `#${pr.number} ${pr.title}`
-        : ((await currentBranch(cwd)) ?? '');
+      const description = pr ? `#${pr.number} ${pr.title}` : ((await currentBranch(cwd)) ?? '');
       return {
         label: worktree.name,
         description,

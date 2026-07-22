@@ -13,6 +13,7 @@ import {
 import { log } from './log';
 import { resolveWorktreePr } from './pr';
 import { LayoutStore } from './store';
+import { currentBranch } from './worktrees';
 
 export type FilesElement = FileEntry;
 
@@ -93,8 +94,10 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
   private compareLabel: string | undefined;
   private warnedFilterKey: string | undefined;
   // Both caches avoid re-spawning `gh`/`git` on every re-render; keyed so a
-  // different root recomputes.
-  private cachedCompareRef: { key: string; ref: string | undefined } | undefined;
+  // different root (or branch) recomputes. `fromPr` records whether the ref
+  // is the PR's target branch or the default-branch fallback — only the
+  // fallback is retried (see subscribeToRepository).
+  private cachedCompareRef: { key: string; ref: string | undefined; fromPr: boolean } | undefined;
   private detectedDefault: { root: string; branch: string | undefined } | undefined;
 
   // Whether directory rows default to expanded (the view-title toggle). The
@@ -194,6 +197,13 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
       return;
     }
     this.repoSubscription = await onRepositoryStateChanged(root, () => {
+      // A fallback ref may just mean the PR didn't exist (or `gh` failed)
+      // when it was resolved — drop it so the next recompute retries the PR
+      // lookup. A PR-derived ref is kept; re-querying gh on every git state
+      // change would spam the network for a base that rarely changes.
+      if (this.cachedCompareRef && !this.cachedCompareRef.fromPr) {
+        this.cachedCompareRef = undefined;
+      }
       clearTimeout(this.repoRefreshTimer);
       this.repoRefreshTimer = setTimeout(() => this.emitter.fire(), 1000);
     });
@@ -303,11 +313,15 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
    * is no PR.
    */
   private async compareRef(root: vscode.Uri): Promise<string | undefined> {
-    const key = root.toString();
+    // The branch is part of the key: checking out another branch changes
+    // which PR (and so which target branch) the comparison should follow.
+    const branch = await currentBranch(root.fsPath);
+    const key = `${root.toString()}|${branch ?? ''}`;
     if (this.cachedCompareRef?.key !== key) {
       const pr = await resolveWorktreePr(root.fsPath);
-      const ref = pr ? `origin/${pr.baseRefName}` : await this.defaultBranch(root);
-      this.cachedCompareRef = { key, ref };
+      this.cachedCompareRef = pr
+        ? { key, ref: `origin/${pr.baseRefName}`, fromPr: true }
+        : { key, ref: await this.defaultBranch(root), fromPr: false };
     }
     return this.cachedCompareRef.ref;
   }
