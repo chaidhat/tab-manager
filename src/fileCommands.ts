@@ -84,6 +84,10 @@ export function registerFileCommands(context: vscode.ExtensionContext, store: La
  * path at the base. A deleted file has no working-tree side to diff, so it
  * opens read-only as it existed at the ref instead. Falls back to a plain
  * open if the Git extension can't serve the ref content.
+ *
+ * Every path opens as a preview so clicking through the changed-file list
+ * reuses one tab, as Source Control does; VS Code promotes the tab to a
+ * permanent one the moment it is edited or double-clicked.
  */
 async function openDiff(
   uri: vscode.Uri,
@@ -95,16 +99,16 @@ async function openDiff(
   const atBase = await gitUriAtRef(originalUri ?? uri, baseRef);
   if (!atBase) {
     if (!deleted) {
-      await vscode.commands.executeCommand('vscode.open', uri);
+      await vscode.commands.executeCommand('vscode.open', uri, { preview: true });
     }
     return;
   }
   if (deleted) {
-    await vscode.commands.executeCommand('vscode.open', atBase, { preview: false });
+    await vscode.commands.executeCommand('vscode.open', atBase, { preview: true });
     return;
   }
   const title = `${path.basename(uri.fsPath)} (${branchLabel} ↔ Working Tree)`;
-  await vscode.commands.executeCommand('vscode.diff', atBase, uri, title, { preview: false });
+  await vscode.commands.executeCommand('vscode.diff', atBase, uri, title, { preview: true });
 }
 
 /** Prompts for a name and creates a file or folder inside `dirUri`. */

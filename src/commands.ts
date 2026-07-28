@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { errorMessage } from './cli';
 import { log } from './log';
 import { listOpenPrs, resolveWorktreePr } from './pr';
-import type { RepoSection } from './tree';
+import type { RepoSection } from './rootWorktreeManager';
 import { WorktreeElement } from './types';
 import {
   addWorktree,
@@ -59,8 +59,8 @@ export function registerCommands(
 
 /**
  * Picks another of the super-repo's worktrees and opens it in its own new
- * window — the same thing clicking a worktree row in the root hub does. That
- * window activates as a child worktree window, so its Pull Request and Files
+ * window — the same thing clicking a worktree row in the root window's Worktrees view does. That
+ * window activates as a sub-worktree window, so its Pull Request and Files
  * Changed views show the picked worktree.
  */
 async function switchWorktree(): Promise<void> {
@@ -83,7 +83,7 @@ async function switchWorktree(): Promise<void> {
 
   const currentPath = folder.uri.fsPath;
   // Each row shows the worktree's PR (via the same branch-based `gh` lookup
-  // the hub rows use), falling back to the branch when there's no PR. Passing
+  // the root Worktrees rows use), falling back to the branch when there's no PR. Passing
   // the promise keeps the quick pick open with a busy bar while gh resolves.
   const items = Promise.all(
     worktrees.map(async (worktree) => {

@@ -44,12 +44,14 @@ function isPrStatus(element: TreeElement): element is PrStatusElement {
 }
 
 /**
- * The "Worktrees" view: a collapsible section per repository, one row per
- * worktree. Clicking a worktree opens it in a new window rooted at its
- * folder; a row whose branch has a PR displays the PR's title, resolved in
- * the background via `gh`.
+ * The root window's "Worktrees" view: a collapsible section per repository,
+ * one row per worktree. Clicking a worktree opens it in a new window rooted
+ * at its folder, which comes up as a sub worktree window. A row whose branch
+ * has a PR displays the PR's title, resolved in the background via `gh`.
  */
-export class LayoutTreeProvider implements vscode.TreeDataProvider<TreeElement>, vscode.Disposable {
+export class RootWorktreeManager
+  implements vscode.TreeDataProvider<TreeElement>, vscode.Disposable
+{
   private readonly emitter = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.emitter.event;
   private readonly subscriptions: vscode.Disposable[];

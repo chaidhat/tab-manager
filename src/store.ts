@@ -6,7 +6,7 @@ const ACTIVE_KEY = 'tabManager.activeWorktree';
 const DEPRECATED_LINKED_PRS_KEY = 'tabManager.linkedPrs';
 
 /**
- * Per-workspace state: which worktree this window targets (set in child
+ * Per-workspace state: which worktree this window targets (set in sub-worktree
  * worktree windows). Emits {@link onDidChange} whenever the data changes so
  * views can refresh.
  */

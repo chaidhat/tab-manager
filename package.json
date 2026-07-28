@@ -28,8 +28,8 @@
           "icon": "media/icon.svg"
         },
         {
-          "id": "tab-manager-worktree",
-          "title": "Worktree",
+          "id": "tab-manager-sub-worktree",
+          "title": "Sub Worktree",
           "icon": "media/worktree-icon.svg"
         }
       ]
@@ -38,33 +38,33 @@
       "tab-manager": [
         {
           "type": "tree",
-          "id": "tab-manager.layouts",
+          "id": "tab-manager.rootWorktrees",
           "name": "Worktrees",
-          "when": "!tabManager.isChildWorktree"
+          "when": "!tabManager.isSubWorktree"
         }
       ],
-      "tab-manager-worktree": [
+      "tab-manager-sub-worktree": [
         {
           "type": "webview",
-          "id": "tab-manager.worktreePr",
+          "id": "tab-manager.subWorktreePr",
           "name": "Pull Request",
-          "when": "tabManager.isChildWorktree"
+          "when": "tabManager.isSubWorktree"
         },
         {
           "type": "tree",
-          "id": "tab-manager.worktreeFiles",
+          "id": "tab-manager.subWorktreeFiles",
           "name": "Files Changed",
-          "when": "tabManager.isChildWorktree"
+          "when": "tabManager.isSubWorktree"
         }
       ]
     },
     "viewsWelcome": [
       {
-        "view": "tab-manager.layouts",
+        "view": "tab-manager.rootWorktrees",
         "contents": "Open a repository to manage its worktrees — create them (from scratch or from a PR), and click one to open it in its own window."
       },
       {
-        "view": "tab-manager.worktreeFiles",
+        "view": "tab-manager.subWorktreeFiles",
         "contents": "No files changed compared to the base branch."
       }
     ],
@@ -222,126 +222,126 @@
       "view/title": [
         {
           "command": "tabManager.refreshWorktrees",
-          "when": "view == tab-manager.layouts",
+          "when": "view == tab-manager.rootWorktrees",
           "group": "navigation"
         },
         {
           "command": "tabManager.refreshPr",
-          "when": "view == tab-manager.worktreePr",
+          "when": "view == tab-manager.subWorktreePr",
           "group": "navigation"
         },
         {
           "command": "tabManager.switchWorktree",
-          "when": "view == tab-manager.worktreePr",
+          "when": "view == tab-manager.subWorktreePr",
           "group": "1_switch@1"
         },
         {
           "command": "tabManager.switchWorktree",
-          "when": "view == tab-manager.worktreeFiles",
+          "when": "view == tab-manager.subWorktreeFiles",
           "group": "1_switch@1"
         },
         {
           "command": "tabManager.filesExpandAll",
-          "when": "view == tab-manager.worktreeFiles && !tabManager.filesExpanded",
+          "when": "view == tab-manager.subWorktreeFiles && !tabManager.filesExpanded",
           "group": "navigation"
         },
         {
           "command": "tabManager.filesCollapseAll",
-          "when": "view == tab-manager.worktreeFiles && tabManager.filesExpanded",
+          "when": "view == tab-manager.subWorktreeFiles && tabManager.filesExpanded",
           "group": "navigation"
         }
       ],
       "webview/context": [
         {
           "command": "tabManager.editPrTitle",
-          "when": "webviewId == 'tab-manager.worktreePr' && webviewSection == 'prActions'"
+          "when": "webviewId == 'tab-manager.subWorktreePr' && webviewSection == 'prActions'"
         },
         {
           "command": "tabManager.editPrDescription",
-          "when": "webviewId == 'tab-manager.worktreePr' && webviewSection == 'prActions'"
+          "when": "webviewId == 'tab-manager.subWorktreePr' && webviewSection == 'prActions'"
         }
       ],
       "view/item/context": [
         {
           "submenu": "tabManager.newWorktreeMenu",
-          "when": "view == tab-manager.layouts && viewItem == repo-git",
+          "when": "view == tab-manager.rootWorktrees && viewItem == repo-git",
           "group": "inline"
         },
         {
           "command": "tabManager.copyWorktreePath",
-          "when": "view == tab-manager.layouts && viewItem =~ /^worktree/",
+          "when": "view == tab-manager.rootWorktrees && viewItem =~ /^worktree/",
           "group": "inline@0"
         },
         {
           "command": "tabManager.deleteWorktree",
-          "when": "view == tab-manager.layouts && viewItem == worktree-closed",
+          "when": "view == tab-manager.rootWorktrees && viewItem == worktree-closed",
           "group": "inline@2"
         },
         {
           "command": "tabManager.newFile",
-          "when": "view == tab-manager.worktreeFiles && viewItem == fileDirectory",
+          "when": "view == tab-manager.subWorktreeFiles && viewItem == fileDirectory",
           "group": "1_open@1"
         },
         {
           "command": "tabManager.newFolder",
-          "when": "view == tab-manager.worktreeFiles && viewItem == fileDirectory",
+          "when": "view == tab-manager.subWorktreeFiles && viewItem == fileDirectory",
           "group": "1_open@2"
         },
         {
           "command": "tabManager.openToSide",
-          "when": "view == tab-manager.worktreeFiles && viewItem == fileLeaf",
+          "when": "view == tab-manager.subWorktreeFiles && viewItem == fileLeaf",
           "group": "1_open@1"
         },
         {
           "command": "tabManager.openWith",
-          "when": "view == tab-manager.worktreeFiles && viewItem == fileLeaf",
+          "when": "view == tab-manager.subWorktreeFiles && viewItem == fileLeaf",
           "group": "1_open@2"
         },
         {
           "command": "tabManager.revealInFinder",
-          "when": "view == tab-manager.worktreeFiles && viewItem =~ /^file/",
+          "when": "view == tab-manager.subWorktreeFiles && viewItem =~ /^file/",
           "group": "1_open@3"
         },
         {
           "command": "tabManager.cutFile",
-          "when": "view == tab-manager.worktreeFiles && viewItem =~ /^file/",
+          "when": "view == tab-manager.subWorktreeFiles && viewItem =~ /^file/",
           "group": "2_clipboard@1"
         },
         {
           "command": "tabManager.copyFile",
-          "when": "view == tab-manager.worktreeFiles && viewItem =~ /^file/",
+          "when": "view == tab-manager.subWorktreeFiles && viewItem =~ /^file/",
           "group": "2_clipboard@2"
         },
         {
           "command": "tabManager.pasteFile",
-          "when": "view == tab-manager.worktreeFiles && viewItem == fileDirectory && tabManager.canPaste",
+          "when": "view == tab-manager.subWorktreeFiles && viewItem == fileDirectory && tabManager.canPaste",
           "group": "2_clipboard@3"
         },
         {
           "command": "tabManager.copyPath",
-          "when": "view == tab-manager.worktreeFiles && viewItem =~ /^file/",
+          "when": "view == tab-manager.subWorktreeFiles && viewItem =~ /^file/",
           "group": "3_path@1"
         },
         {
           "command": "tabManager.copyRelativePath",
-          "when": "view == tab-manager.worktreeFiles && viewItem =~ /^file/",
+          "when": "view == tab-manager.subWorktreeFiles && viewItem =~ /^file/",
           "group": "3_path@2"
         },
         {
           "command": "tabManager.renameFile",
-          "when": "view == tab-manager.worktreeFiles && viewItem =~ /^file/",
+          "when": "view == tab-manager.subWorktreeFiles && viewItem =~ /^file/",
           "group": "4_mutate@1"
         },
         {
           "command": "tabManager.deleteFile",
-          "when": "view == tab-manager.worktreeFiles && viewItem =~ /^file/",
+          "when": "view == tab-manager.subWorktreeFiles && viewItem =~ /^file/",
           "group": "4_mutate@2"
         }
       ],
       "commandPalette": [
         {
           "command": "tabManager.switchWorktree",
-          "when": "tabManager.isChildWorktree"
+          "when": "tabManager.isSubWorktree"
         },
         {
           "command": "tabManager.newFile",
@@ -435,16 +435,16 @@
     },
     "keybindings": [
       {
-        "command": "tab-manager.layouts.focus",
+        "command": "tab-manager.rootWorktrees.focus",
         "key": "ctrl+shift+g",
         "mac": "cmd+shift+g",
-        "when": "!tabManager.isChildWorktree"
+        "when": "!tabManager.isSubWorktree"
       },
       {
-        "command": "workbench.view.extension.tab-manager-worktree",
+        "command": "workbench.view.extension.tab-manager-sub-worktree",
         "key": "ctrl+shift+g",
         "mac": "cmd+shift+g",
-        "when": "tabManager.isChildWorktree"
+        "when": "tabManager.isSubWorktree"
       }
     ]
   },

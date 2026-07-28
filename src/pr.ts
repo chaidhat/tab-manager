@@ -137,7 +137,7 @@ export function registerPrView(context: vscode.ExtensionContext, store: LayoutSt
 
   context.subscriptions.push(
     provider,
-    vscode.window.registerWebviewViewProvider('tab-manager.worktreePr', provider),
+    vscode.window.registerWebviewViewProvider('tab-manager.subWorktreePr', provider),
     vscode.commands.registerCommand(PR_COMMANDS.refresh, () => provider.refresh()),
     // Both are invoked from the webview's native "…" context menu, which
     // passes the button's `data-vscode-context` object as the sole argument.
@@ -292,7 +292,7 @@ function renderDigitStrip(prNumber: number): string {
 function renderHtml(state: PrViewState | undefined, codiconsHref: string): string {
   let content: string;
   if (!state) {
-    content = `<p class="muted">Click a worktree in the Layouts section to see its pull request.</p>`;
+    content = `<p class="muted">Click a worktree in the Worktrees view to see its pull request.</p>`;
   } else if (state.lookup.kind === 'no-gh') {
     content = `<p class="muted">GitHub CLI (gh) not found — <code>brew install gh</code>.</p>`;
   } else if (state.lookup.kind === 'none') {

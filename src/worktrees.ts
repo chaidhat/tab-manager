@@ -140,12 +140,12 @@ export async function currentBranch(cwd: string): Promise<string | undefined> {
 }
 
 /**
- * Whether this window's workspace is a single child worktree — strictly the
+ * Whether this window's workspace is a single sub-worktree — strictly the
  * `<repo>/.claude/worktrees/<name>` convention. A folder without `../worktrees`
  * and `../../.claude` above it is treated as a root window even when it is a
  * linked git worktree (e.g. worktrees managed by other tooling elsewhere).
  */
-export async function isChildWorktreeWindow(): Promise<boolean> {
+export async function isSubWorktreeWindow(): Promise<boolean> {
   const folders = vscode.workspace.workspaceFolders;
   if (folders?.length !== 1) {
     return false;

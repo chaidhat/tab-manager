@@ -61,14 +61,14 @@ export class ChangedFileDecorationProvider implements vscode.FileDecorationProvi
 }
 
 /**
- * The "Files" view: the active worktree's file tree, and only that
- * worktree's — unlike the built-in Explorer, which has no way to scope a
- * multi-root workspace down to one root. Rows carry a `resourceUri`, the only
- * way the Tree API can color a row's text; this pulls in the built-in Git
- * extension's own decorations for free (green additions, orange
- * modifications, dimmed ignored files) with no git-status code of our own, at
- * the cost of VS Code also showing that row's file-type icon — an unavoidable
- * pairing, there is no way to get decorated text without it.
+ * The Sub Worktree container's "Files Changed" view: the active worktree's
+ * file tree, and only that worktree's — unlike the built-in Explorer, which
+ * has no way to scope a multi-root workspace down to one root. Rows carry a
+ * `resourceUri`, the only way the Tree API can color a row's text; this pulls
+ * in the built-in Git extension's own decorations for free (green additions,
+ * orange modifications, dimmed ignored files) with no git-status code of our
+ * own, at the cost of VS Code also showing that row's file-type icon — an
+ * unavoidable pairing, there is no way to get decorated text without it.
  *
  * The tree is filtered to files that differ from the worktree's PR base
  * branch — the branch the PR merges into, resolved via `gh` — falling back
@@ -76,7 +76,9 @@ export class ChangedFileDecorationProvider implements vscode.FileDecorationProvi
  * uncommitted changes). Folders show only while they contain changed files.
  * When the comparison can't be made, the full tree is shown instead.
  */
-export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>, vscode.Disposable {
+export class SubWorktreeManager
+  implements vscode.TreeDataProvider<FilesElement>, vscode.Disposable
+{
   private readonly emitter = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.emitter.event;
   private readonly subscription: vscode.Disposable;
@@ -392,8 +394,10 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
       // fallback (diff unavailable) open normally too.
       const branch = this.compareLabel;
       const asDiff = this.compareBase !== undefined && branch !== undefined && change !== undefined;
-      // preview: false — a preview tab would be REPLACED by the next click,
-      // making it impossible to build a stack of tabs from this view.
+      // preview: true, like Source Control — clicking through the list reuses
+      // one tab instead of stacking a tab per file. VS Code pins the tab as
+      // soon as it is edited or double-clicked, so a file you actually work on
+      // survives the next click.
       item.command =
         asDiff && change.kind !== 'added'
           ? {
@@ -410,7 +414,7 @@ export class FilesTreeProvider implements vscode.TreeDataProvider<FilesElement>,
           : {
               command: 'vscode.open',
               title: 'Open File',
-              arguments: [node.uri, { preview: false }],
+              arguments: [node.uri, { preview: true }],
             };
     }
     return item;
