@@ -2,7 +2,7 @@
   "name": "tab-manager",
   "displayName": "Tab Manager",
   "description": "Worktree-centric window management: one window per worktree, with PR linking, creation from PRs, and changed-file diffs.",
-  "version": "0.2.22",
+  "version": "0.2.27",
   "publisher": "chaidhat",
   "license": "MIT",
   "repository": {
@@ -23,7 +23,7 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "tab-manager",
+          "id": "tab-manager-root",
           "title": "Tab Manager",
           "icon": "media/icon.svg"
         },
@@ -35,12 +35,11 @@
       ]
     },
     "views": {
-      "tab-manager": [
+      "tab-manager-root": [
         {
           "type": "tree",
           "id": "tab-manager.rootWorktrees",
-          "name": "Worktrees",
-          "when": "!tabManager.isSubWorktree"
+          "name": "Worktrees"
         }
       ],
       "tab-manager-sub-worktree": [

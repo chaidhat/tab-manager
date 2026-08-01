@@ -43,7 +43,11 @@ export async function groupFoldersByRepo(
   }
 
   for (const [repoRoot, group] of repos) {
-    for (const discovered of await discoverClaudeWorktrees(repoRoot)) {
+    // The main checkout itself, then its sibling worktrees. The checkout is
+    // already in the group in a root window (it is the open folder); in a sub
+    // worktree window it is not, and the section would otherwise omit it.
+    const rootRef: FolderRef = { uri: vscode.Uri.file(repoRoot), name: path.basename(repoRoot) };
+    for (const discovered of [rootRef, ...(await discoverClaudeWorktrees(repoRoot))]) {
       if (!group.folders.some((existing) => existing.uri.fsPath === discovered.uri.fsPath)) {
         group.folders.push(discovered);
       }

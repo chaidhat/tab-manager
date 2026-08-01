@@ -1,6 +1,7 @@
 .vscode/**
 .vscode-test/**
 .context/**
+.claude/**
 src/**
 dist/test/**
 dist/**/*.map
