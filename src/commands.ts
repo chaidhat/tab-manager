@@ -8,6 +8,7 @@ import {
   addWorktree,
   addWorktreeForPr,
   currentBranch,
+  deleteTrashedWorktree,
   discoverClaudeWorktrees,
   removeWorktree,
   repoRootOf,
@@ -182,6 +183,12 @@ async function createWorktreeFromPr(
  * dirty worktree gets a second, explicit force confirmation quoting git's
  * refusal. Open workspace folders never get this action (menu-gated), since
  * deleting a folder out from under the workspace breaks it.
+ *
+ * Two steps, each with its own progress notification, because they differ by
+ * orders of magnitude: unregistering moves the directory aside and takes
+ * milliseconds, while unlinking the files it moved takes seconds on a worktree
+ * with `node_modules`. The row disappears after the first, so the slow half
+ * runs with the tree already correct.
  */
 async function deleteWorktree(
   worktree: WorktreeElement,
@@ -195,7 +202,10 @@ async function deleteWorktree(
   }
   const choice = await vscode.window.showWarningMessage(
     `Delete the worktree "${worktree.name}" and its files?`,
-    { modal: true, detail: 'Runs `git worktree remove`. This deletes the directory.' },
+    {
+      modal: true,
+      detail: 'The worktree is unregistered right away; its files delete in the background.',
+    },
     'Delete',
   );
   if (choice !== 'Delete') {
@@ -203,8 +213,9 @@ async function deleteWorktree(
   }
 
   const folderPath = vscode.Uri.parse(worktree.folderUri).fsPath;
+  let trashPath: string;
   try {
-    await removeWorktree(folderPath, false);
+    trashPath = await unregister(worktree.name, folderPath, false);
   } catch (error) {
     const force = await vscode.window.showWarningMessage(
       `Git refused to delete "${worktree.name}".`,
@@ -215,15 +226,53 @@ async function deleteWorktree(
       return;
     }
     try {
-      await removeWorktree(folderPath, true);
+      trashPath = await unregister(worktree.name, folderPath, true);
     } catch (forceError) {
       vscode.window.showErrorMessage(errorMessage(forceError));
       return;
     }
   }
 
+  // Git has forgotten the worktree and its directory is out of the discovered
+  // path, so the row can go now — the files outlive it by a few seconds.
   refreshWorktrees();
-  vscode.window.showInformationMessage(`Deleted worktree "${worktree.name}".`);
+  await deleteTrashedFiles(worktree.name, trashPath);
+}
+
+/** Step one: unregister and move aside, under a progress notification. */
+function unregister(name: string, folderPath: string, force: boolean): Thenable<string> {
+  return vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: `${force ? 'Force-deleting' : 'Deleting'} worktree "${name}"…`,
+    },
+    () => removeWorktree(folderPath, force),
+  );
+}
+
+/**
+ * Step two: unlink the moved files. A failure here leaves disk in use but the
+ * worktree genuinely deleted, so it reports as a leak to clean up rather than
+ * as a delete that didn't happen.
+ */
+async function deleteTrashedFiles(name: string, trashPath: string): Promise<void> {
+  await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: `Deleting worktree "${name}" — removing files…`,
+    },
+    async () => {
+      try {
+        await deleteTrashedWorktree(trashPath);
+        vscode.window.showInformationMessage(`Deleted worktree "${name}".`);
+      } catch (error) {
+        log(`delete worktree: leftover files at ${trashPath}: ${errorMessage(error)}`);
+        vscode.window.showWarningMessage(
+          `Deleted worktree "${name}", but its files are still on disk at ${trashPath}: ${errorMessage(error)}`,
+        );
+      }
+    },
+  );
 }
 
 export function folderName(folderUri: string): string {

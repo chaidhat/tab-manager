@@ -5,7 +5,7 @@ import { registerPrView } from './pr';
 import { RootWorktreeManager } from './rootWorktreeManager';
 import { LayoutStore } from './store';
 import { ChangedFileDecorationProvider, SubWorktreeManager } from './subWorktreeManager';
-import { isSubWorktreeWindow } from './worktrees';
+import { isSubWorktreeWindow, sweepWorktreeTrash } from './worktrees';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const store = new LayoutStore(context.workspaceState);
@@ -58,6 +58,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   registerCommands(context, () => rootManager.refresh());
   registerFileCommands(context, store);
   registerPrView(context, store);
+
+  // Files a delete left behind because the window closed mid-removal. Not
+  // awaited: activation shouldn't wait on unlinking, and nothing depends on it.
+  void sweepWorktreeTrash();
 }
 
 export function deactivate(): void {}
