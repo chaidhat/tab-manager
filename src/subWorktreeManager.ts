@@ -61,7 +61,7 @@ export class ChangedFileDecorationProvider implements vscode.FileDecorationProvi
 }
 
 /**
- * The Sub Worktree container's "Files Changed" view: the active worktree's
+ * The Sub Worktree Manager container's "Files Changed" view: the active worktree's
  * file tree, and only that worktree's — unlike the built-in Explorer, which
  * has no way to scope a multi-root workspace down to one root. Rows carry a
  * `resourceUri`, the only way the Tree API can color a row's text; this pulls

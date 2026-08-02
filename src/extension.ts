@@ -5,7 +5,7 @@ import { registerPrView } from './pr';
 import { RootWorktreeManager } from './rootWorktreeManager';
 import { LayoutStore } from './store';
 import { ChangedFileDecorationProvider, SubWorktreeManager } from './subWorktreeManager';
-import { isSubWorktreeWindow, sweepWorktreeTrash } from './worktrees';
+import { isSubWorktreeWindow } from './worktrees';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const store = new LayoutStore(context.workspaceState);
@@ -13,9 +13,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const subManager = new SubWorktreeManager(store);
 
   // A window opened at a `.claude/worktrees/<name>` folder additionally gets
-  // the dedicated Sub Worktree container, whose views target that folder. The
-  // Tab Manager container stays alongside it in every window, so the worktree
-  // list is one activity-bar click away from a worktree window too.
+  // the dedicated Sub Worktree Manager container, whose views target that
+  // folder. The Root Worktree Manager container stays alongside it in every
+  // window, so the worktree list is one activity-bar click away from a
+  // worktree window too.
   // The context key has to land before the sub views are created: a view whose
   // `when` is false is not in the registry yet, and registering against it
   // fails with "No view is registered with id".
@@ -50,18 +51,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('tabManager.filesCollapseAll', () =>
       subManager.setExpandAll(false),
     ),
-    // The Worktrees view's title refresh — drops the PR/branch caches so rows
-    // re-query gh and pick up merged/renamed PRs.
+    // The Root Worktree Manager view's title refresh — drops the PR/branch
+    // caches so rows re-query gh and pick up merged/renamed PRs.
     vscode.commands.registerCommand('tabManager.refreshWorktrees', () => rootManager.refresh()),
   );
 
   registerCommands(context, () => rootManager.refresh());
   registerFileCommands(context, store);
   registerPrView(context, store);
-
-  // Files a delete left behind because the window closed mid-removal. Not
-  // awaited: activation shouldn't wait on unlinking, and nothing depends on it.
-  void sweepWorktreeTrash();
 }
 
 export function deactivate(): void {}

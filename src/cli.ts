@@ -1,5 +1,4 @@
 import { execFile } from 'child_process';
-import { rm } from 'fs/promises';
 import { promisify } from 'util';
 
 const run = promisify(execFile);
@@ -32,24 +31,6 @@ export async function gh(args: string[], cwd: string): Promise<string> {
 export async function git(args: string[], cwd: string): Promise<string> {
   const { stdout } = await run('git', args, { cwd });
   return stdout;
-}
-
-/**
- * Recursively deletes a directory. Shells out so the unlink storm — a worktree
- * carrying `node_modules` is ~150k files, ~12s of syscalls — runs in its own
- * process instead of churning the extension host's event loop. Falls back to
- * Node's own recursive delete where there is no `rm` (Windows).
- */
-export async function removeDirectory(target: string): Promise<void> {
-  try {
-    await run('rm', ['-rf', target]);
-  } catch (error) {
-    // `rm -rf` succeeds on a missing target, so ENOENT is the binary itself.
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw error;
-    }
-    await rm(target, { recursive: true, force: true });
-  }
 }
 
 /**

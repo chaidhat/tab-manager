@@ -24,13 +24,13 @@
       "activitybar": [
         {
           "id": "tab-manager-root",
-          "title": "Tab Manager",
-          "icon": "media/icon.svg"
+          "title": "Root Worktree Manager",
+          "icon": "media/layers-dot.svg"
         },
         {
           "id": "tab-manager-sub-worktree",
-          "title": "Sub Worktree",
-          "icon": "media/worktree-icon.svg"
+          "title": "Sub Worktree Manager",
+          "icon": "media/layers.svg"
         }
       ]
     },
@@ -39,7 +39,7 @@
         {
           "type": "tree",
           "id": "tab-manager.rootWorktrees",
-          "name": "Worktrees"
+          "name": "Root Worktree Manager"
         }
       ],
       "tab-manager-sub-worktree": [

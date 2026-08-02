@@ -292,7 +292,7 @@ function renderDigitStrip(prNumber: number): string {
 function renderHtml(state: PrViewState | undefined, codiconsHref: string): string {
   let content: string;
   if (!state) {
-    content = `<p class="muted">Click a worktree in the Worktrees view to see its pull request.</p>`;
+    content = `<p class="muted">Click a worktree in the Root Worktree Manager view to see its pull request.</p>`;
   } else if (state.lookup.kind === 'no-gh') {
     content = `<p class="muted">GitHub CLI (gh) not found — <code>brew install gh</code>.</p>`;
   } else if (state.lookup.kind === 'none') {

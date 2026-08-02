@@ -44,10 +44,11 @@ function isPrStatus(element: TreeElement): element is PrStatusElement {
 }
 
 /**
- * The root window's "Worktrees" view: a collapsible section per repository,
- * one row per worktree. Clicking a worktree opens it in a new window rooted
- * at its folder, which comes up as a sub worktree window. A row whose branch
- * has a PR displays the PR's title, resolved in the background via `gh`.
+ * The root window's "Root Worktree Manager" view: a collapsible section per
+ * repository, one row per worktree. Clicking a worktree opens it in a new
+ * window rooted at its folder, which comes up as a sub worktree window. A row
+ * whose branch has a PR displays the PR's title, resolved in the background
+ * via `gh`.
  */
 export class RootWorktreeManager
   implements vscode.TreeDataProvider<TreeElement>, vscode.Disposable

@@ -1,8 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { errorMessage, gh, git, removeDirectory } from './cli';
-import { log } from './log';
+import { errorMessage, gh, git } from './cli';
 
 /** A folder to show in the sidebar — an open workspace folder or a discovered one. */
 export interface FolderRef {
@@ -19,10 +18,6 @@ export interface RepoGroup {
 }
 
 const CLAUDE_WORKTREES_DIR = '.claude/worktrees';
-// Deleted worktrees are renamed in here and unlinked afterwards. A sibling of
-// `worktrees/` rather than a child, so a pending delete is never discovered as
-// a row, and inside the repo so the rename stays on one filesystem.
-const TRASH_DIR = '.claude/.tab-manager-trash';
 
 /**
  * Groups workspace folders by the git repository they belong to, so several
@@ -122,19 +117,18 @@ export async function addWorktreeForPr(repoRoot: string, prNumber: number): Prom
 }
 
 /**
- * Unregisters a git worktree and moves its files aside, returning the path
- * they were moved to. Deliberately not `git worktree remove`: that command
- * deletes the directory inline, and for a worktree carrying `node_modules`
- * (~150k files) the recursive unlink is ~12s of syscalls the user would sit
- * through. Renaming is one syscall, so the worktree is gone from git and from
- * the tree in milliseconds; the caller then hands the returned path to
- * {@link deleteTrashedWorktree} off the path anything waits on.
+ * Unregisters a git worktree and moves its directory to the OS trash.
+ * Deliberately not `git worktree remove`: that command unlinks the directory
+ * inline, and for a worktree carrying `node_modules` (~150k files) that is
+ * ~12s of syscalls the user sits through. Trashing is a rename — 12ms at the
+ * same file count — so nothing is left running once the command returns, and
+ * the files stay recoverable until the trash is emptied.
  *
  * Without `force`, the same conditions git refuses on — a locked worktree, or
  * modified/untracked files — throw here instead, with git's wording, so the
  * caller's force prompt reads the way it always has.
  */
-export async function removeWorktree(folderPath: string, force: boolean): Promise<string> {
+export async function removeWorktree(folderPath: string, force: boolean): Promise<void> {
   const repoRoot = await repoRootOf(vscode.Uri.file(folderPath));
   if (!repoRoot || repoRoot === folderPath) {
     throw new Error('Not a linked git worktree — refusing to delete a main checkout.');
@@ -148,14 +142,13 @@ export async function removeWorktree(folderPath: string, force: boolean): Promis
     await checkRemovable(folderPath, repoRoot);
   }
 
-  // Same repository, hence same filesystem, so this is a directory-entry
-  // update rather than a copy. Node's rename is used over the VS Code file API
-  // precisely because it fails on a cross-device path (a `.claude/worktrees`
-  // symlinked to another volume) instead of silently copying gigabytes.
-  const trashPath = path.join(repoRoot, TRASH_DIR, `${path.basename(folderPath)}-${Date.now()}`);
-  await fs.mkdir(path.dirname(trashPath), { recursive: true });
+  // Files first: a failure here leaves the worktree entirely untouched, where
+  // unregistering first would leave one git had forgotten but disk still had.
   try {
-    await fs.rename(folderPath, trashPath);
+    await vscode.workspace.fs.delete(vscode.Uri.file(folderPath), {
+      recursive: true,
+      useTrash: true,
+    });
   } catch (error) {
     throw new Error(errorMessage(error), { cause: error });
   }
@@ -164,60 +157,12 @@ export async function removeWorktree(folderPath: string, force: boolean): Promis
   // bookkeeping for this worktree alone. A blanket `git worktree prune` would
   // also unregister every other worktree whose directory is currently missing.
   try {
-    await removeDirectory(adminDir);
+    await fs.rm(adminDir, { recursive: true, force: true });
   } catch (error) {
     throw new Error(
-      `Files were moved to ${trashPath}, but git still lists the worktree: ${errorMessage(error)}`,
+      `The worktree is in the trash, but git still lists it: ${errorMessage(error)}`,
       { cause: error },
     );
-  }
-  return trashPath;
-}
-
-/**
- * Deletes files moved aside by {@link removeWorktree}. Slow in proportion to
- * the file count — seconds for a worktree with `node_modules` — but nothing
- * depends on it: git and the tree have already forgotten the worktree.
- */
-export async function deleteTrashedWorktree(trashPath: string): Promise<void> {
-  await removeDirectory(trashPath);
-}
-
-/**
- * Deletes anything left in the repos' trash directories by a window that
- * closed mid-delete, so an interrupted removal can't strand the files
- * indefinitely. Best-effort and logged rather than surfaced: it runs at
- * activation, where the user has asked for nothing.
- */
-export async function sweepWorktreeTrash(): Promise<void> {
-  const repoRoots = new Set<string>();
-  for (const folder of vscode.workspace.workspaceFolders ?? []) {
-    const repoRoot = await repoRootOf(folder.uri);
-    if (repoRoot) {
-      repoRoots.add(repoRoot);
-    }
-  }
-
-  for (const repoRoot of repoRoots) {
-    const trashDir = path.join(repoRoot, TRASH_DIR);
-    let entries: string[];
-    try {
-      entries = await fs.readdir(trashDir);
-    } catch {
-      continue; // No trash directory — nothing has ever been deleted here.
-    }
-    for (const entry of entries) {
-      const target = path.join(trashDir, entry);
-      try {
-        await removeDirectory(target);
-        log(`trash sweep: removed ${target}`);
-      } catch (error) {
-        log(`trash sweep: failed for ${target}: ${errorMessage(error)}`);
-      }
-    }
-    // Leave no empty scaffolding in the repo. Fails harmlessly while another
-    // window has a delete in flight, and the next sweep gets it.
-    await fs.rmdir(trashDir).catch(() => undefined);
   }
 }
 
