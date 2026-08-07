@@ -218,26 +218,18 @@
           "group": "1_new@2"
         }
       ],
+      "viewsContainer/title": [
+        {
+          "command": "tabManager.refreshPr",
+          "when": "viewContainer == workbench.view.extension.tab-manager-sub-worktree",
+          "group": "navigation"
+        }
+      ],
       "view/title": [
         {
           "command": "tabManager.refreshWorktrees",
           "when": "view == tab-manager.rootWorktrees",
           "group": "navigation"
-        },
-        {
-          "command": "tabManager.refreshPr",
-          "when": "view == tab-manager.subWorktreePr",
-          "group": "navigation"
-        },
-        {
-          "command": "tabManager.switchWorktree",
-          "when": "view == tab-manager.subWorktreePr",
-          "group": "1_switch@1"
-        },
-        {
-          "command": "tabManager.switchWorktree",
-          "when": "view == tab-manager.subWorktreeFiles",
-          "group": "1_switch@1"
         },
         {
           "command": "tabManager.filesExpandAll",
