@@ -167,8 +167,8 @@
         "icon": "$(refresh)"
       },
       {
-        "command": "tabManager.refreshPr",
-        "title": "Refresh Pull Request",
+        "command": "tabManager.refreshSubWorktree",
+        "title": "Refresh",
         "category": "Tab Manager",
         "icon": "$(refresh)"
       },
@@ -225,7 +225,7 @@
           "group": "navigation"
         },
         {
-          "command": "tabManager.refreshPr",
+          "command": "tabManager.refreshSubWorktree",
           "when": "view == tab-manager.subWorktreePr",
           "group": "navigation"
         },
@@ -330,6 +330,10 @@
       "commandPalette": [
         {
           "command": "tabManager.switchWorktree",
+          "when": "tabManager.isSubWorktree"
+        },
+        {
+          "command": "tabManager.refreshSubWorktree",
           "when": "tabManager.isSubWorktree"
         },
         {

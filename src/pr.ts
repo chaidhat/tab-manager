@@ -5,7 +5,6 @@ import { LayoutStore } from './store';
 import { currentBranch } from './worktrees';
 
 const PR_COMMANDS = {
-  refresh: 'tabManager.refreshPr',
   editTitle: 'tabManager.editPrTitle',
   editDescription: 'tabManager.editPrDescription',
 } as const;
@@ -130,15 +129,21 @@ interface PrMenuContext {
 /** Description files opened for editing, keyed by fsPath — save publishes. */
 type PendingEdits = Map<string, { cwd: string; number: number }>;
 
-/** Sets up the Pull Request view, its commands, and the save-to-publish hook. */
-export function registerPrView(context: vscode.ExtensionContext, store: LayoutStore): void {
+/**
+ * Sets up the Pull Request view, its commands, and the save-to-publish hook.
+ * Returns a re-render callback so the container-wide refresh command — which
+ * also refreshes the Files Changed tree — can be composed in `extension.ts`.
+ */
+export function registerPrView(
+  context: vscode.ExtensionContext,
+  store: LayoutStore,
+): () => void {
   const provider = new PrWebviewProvider(store, context.extensionUri);
   const pendingEdits: PendingEdits = new Map();
 
   context.subscriptions.push(
     provider,
     vscode.window.registerWebviewViewProvider('tab-manager.subWorktreePr', provider),
-    vscode.commands.registerCommand(PR_COMMANDS.refresh, () => provider.refresh()),
     // Both are invoked from the webview's native "…" context menu, which
     // passes the button's `data-vscode-context` object as the sole argument.
     vscode.commands.registerCommand(PR_COMMANDS.editTitle, (menu: PrMenuContext) =>
@@ -151,6 +156,8 @@ export function registerPrView(context: vscode.ExtensionContext, store: LayoutSt
       publishSavedDescription(document, pendingEdits),
     ),
   );
+
+  return () => provider.refresh();
 }
 
 /**

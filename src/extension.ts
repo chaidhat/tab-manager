@@ -58,7 +58,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   registerCommands(context, () => rootManager.refresh());
   registerFileCommands(context, store);
-  registerPrView(context, store);
+  const refreshPr = registerPrView(context, store);
+
+  // The Sub Worktree Manager's refresh. It sits on the Pull Request view's
+  // title because that is the topmost row an extension can contribute an icon
+  // to — the container header is reserved for built-in views — so it refreshes
+  // both panes rather than only the one it is rendered on.
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tabManager.refreshSubWorktree', () => {
+      refreshPr();
+      subManager.refresh();
+    }),
+  );
 }
 
 export function deactivate(): void {}
