@@ -2,7 +2,7 @@
   "name": "tab-manager",
   "displayName": "Tab Manager",
   "description": "Worktree-centric window management: one window per worktree, with PR linking, creation from PRs, and changed-file diffs.",
-  "version": "0.2.44",
+  "version": "0.2.55",
   "publisher": "chaidhat",
   "license": "MIT",
   "repository": {
@@ -162,12 +162,8 @@
       {
         "command": "tabManager.newWorktreeBlank",
         "title": "New Worktree…",
-        "category": "Tab Manager"
-      },
-      {
-        "command": "tabManager.newWorktreeFromPr",
-        "title": "New Worktree from PR…",
-        "category": "Tab Manager"
+        "category": "Tab Manager",
+        "icon": "$(add)"
       },
       {
         "command": "tabManager.newWorktreeForPr",
@@ -209,16 +205,6 @@
         "category": "Tab Manager"
       },
       {
-        "command": "tabManager.editPrTitle",
-        "title": "Rename...",
-        "category": "Tab Manager"
-      },
-      {
-        "command": "tabManager.editPrDescription",
-        "title": "Edit Description...",
-        "category": "Tab Manager"
-      },
-      {
         "command": "tabManager.filesExpandAll",
         "title": "Expand All Files",
         "category": "Tab Manager",
@@ -231,24 +217,7 @@
         "icon": "$(collapse-all)"
       }
     ],
-    "submenus": [
-      {
-        "id": "tabManager.newWorktreeMenu",
-        "label": "New Worktree",
-        "icon": "$(add)"
-      }
-    ],
     "menus": {
-      "tabManager.newWorktreeMenu": [
-        {
-          "command": "tabManager.newWorktreeBlank",
-          "group": "1_new@1"
-        },
-        {
-          "command": "tabManager.newWorktreeFromPr",
-          "group": "1_new@2"
-        }
-      ],
       "view/title": [
         {
           "command": "tabManager.addRepository",
@@ -274,16 +243,6 @@
           "command": "tabManager.filesCollapseAll",
           "when": "view == tab-manager.subWorktreeFiles && tabManager.filesExpanded",
           "group": "navigation"
-        }
-      ],
-      "webview/context": [
-        {
-          "command": "tabManager.editPrTitle",
-          "when": "webviewId == 'tab-manager.subWorktreePr' && webviewSection == 'prActions'"
-        },
-        {
-          "command": "tabManager.editPrDescription",
-          "when": "webviewId == 'tab-manager.subWorktreePr' && webviewSection == 'prActions'"
         }
       ],
       "commandPalette": [
@@ -360,15 +319,7 @@
           "when": "false"
         },
         {
-          "command": "tabManager.newWorktreeFromPr",
-          "when": "false"
-        },
-        {
           "command": "tabManager.openWorktreeWindow",
-          "when": "false"
-        },
-        {
-          "command": "tabManager.editPrTitle",
           "when": "false"
         },
         {
@@ -377,10 +328,6 @@
         },
         {
           "command": "tabManager.filesCollapseAll",
-          "when": "false"
-        },
-        {
-          "command": "tabManager.editPrDescription",
           "when": "false"
         },
         {
@@ -394,7 +341,7 @@
       ],
       "view/item/context": [
         {
-          "submenu": "tabManager.newWorktreeMenu",
+          "command": "tabManager.newWorktreeBlank",
           "when": "view == tab-manager.rootWorktrees && viewItem == repo-git",
           "group": "inline@1"
         },
@@ -487,6 +434,18 @@
         "key": "ctrl+shift+g",
         "mac": "cmd+shift+g",
         "when": "tabManager.isSubWorktree"
+      }
+    ],
+    "colors": [
+      {
+        "id": "tabManager.worktreeActive",
+        "description": "Root Worktree Manager: the worktree this window is on.",
+        "defaults": {
+          "light": "#2C68C5",
+          "dark": "#2C68C5",
+          "highContrast": "#2C68C5",
+          "highContrastLight": "#2C68C5"
+        }
       }
     ]
   },

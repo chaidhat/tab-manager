@@ -4,11 +4,6 @@ import { log } from './log';
 import { LayoutStore } from './store';
 import { currentBranch } from './worktrees';
 
-const PR_COMMANDS = {
-  editTitle: 'tabManager.editPrTitle',
-  editDescription: 'tabManager.editPrDescription',
-} as const;
-
 /** One entry of gh's `statusCheckRollup`: a check run or a legacy commit status. */
 interface StatusCheck {
   /** Check runs: QUEUED | IN_PROGRESS | COMPLETED. */
@@ -19,7 +14,7 @@ interface StatusCheck {
   state?: string;
 }
 
-/** A pull request as the worktree tree needs it — everything but the body. */
+/** A pull request as the tree lists it — everything but the description. */
 export interface PrSummary {
   number: number;
   title: string;
@@ -36,27 +31,27 @@ export interface PrSummary {
   statusCheckRollup: StatusCheck[] | null;
 }
 
-/** A single pull request, description included, as the Pull Request view shows it. */
-export interface PrInfo extends PrSummary {
+/** One pull request with its description, as the Pull Request view shows it. */
+export interface PrDetail extends PrSummary {
   body: string;
 }
 
-// The `gh --json` field lists. Listing a repo's PRs deliberately leaves out the
-// body: it is only rendered for one PR at a time, and asking for a hundred of
-// them makes the call much heavier for nothing.
-const SUMMARY_FIELDS =
+// The `gh --json` field lists. Listing a repo's PRs deliberately leaves the
+// body out: only one PR's description is ever rendered, and asking for a
+// hundred of them makes that call much heavier for nothing.
+const PR_FIELDS =
   'number,title,state,url,isDraft,baseRefName,headRefName,mergeable,statusCheckRollup';
-const VIEW_FIELDS = `${SUMMARY_FIELDS},body`;
+const DETAIL_FIELDS = `${PR_FIELDS},body`;
 
-type PrLookup = { kind: 'pr'; pr: PrInfo } | { kind: 'none' } | { kind: 'no-gh' };
+type PrLookup = { kind: 'pr'; pr: PrDetail } | { kind: 'none' } | { kind: 'no-gh' };
 
 /**
  * Fetches the PR for the folder's current branch, resolved by `gh pr view`.
  * Throws when there is no PR or `gh` fails.
  */
-async function fetchPr(cwd: string): Promise<PrInfo> {
-  const stdout = await gh(['pr', 'view', '--json', VIEW_FIELDS], cwd);
-  return JSON.parse(stdout) as PrInfo;
+async function fetchPr(cwd: string): Promise<PrDetail> {
+  const stdout = await gh(['pr', 'view', '--json', DETAIL_FIELDS], cwd);
+  return JSON.parse(stdout) as PrDetail;
 }
 
 /** The four states a PR renders as, folding `isDraft` into `state`. */
@@ -83,9 +78,18 @@ const PR_TREE_ICON: Record<PrVisualState, { codicon: string; color: string }> = 
   closed: { codicon: 'git-pull-request-closed', color: 'charts.red' },
 };
 
-/** The `OPEN - ` / `MERGED - ` … prefix for a PR's tree-row label. */
+// One letter per state for the tree-row label, where every character of width
+// costs title: O open, D draft, M merged, C closed.
+const PR_STATE_LETTER: Record<PrVisualState, string> = {
+  open: 'O',
+  draft: 'D',
+  merged: 'M',
+  closed: 'C',
+};
+
+/** The single-letter state that leads a PR's tree-row label. */
 export function prStateLabel(state: PrVisualState): string {
-  return state.toUpperCase();
+  return PR_STATE_LETTER[state];
 }
 
 /**
@@ -130,49 +134,27 @@ interface PrViewState {
  */
 type PrRender = { kind: 'loading' } | { kind: 'ready'; state: PrViewState | undefined };
 
-/** The `data-vscode-context` payload the "…" button's menu commands receive. */
-interface PrMenuContext {
-  cwd: string;
-  prNumber: number;
-  prTitle: string;
-}
-
-/** Description files opened for editing, keyed by fsPath — save publishes. */
-type PendingEdits = Map<string, { cwd: string; number: number }>;
-
 /**
- * Sets up the Pull Request view, its commands, and the save-to-publish hook.
- * Returns a re-render callback so the container-wide refresh command — which
- * also refreshes the Files Changed tree — can be composed in `extension.ts`.
+ * Sets up the Pull Request view. Returns a re-render callback so the
+ * container-wide refresh command — which also refreshes the Files Changed
+ * tree — can be composed in `extension.ts`.
  */
 export function registerPrView(context: vscode.ExtensionContext, store: LayoutStore): () => void {
   const provider = new PrWebviewProvider(store, context.extensionUri);
-  const pendingEdits: PendingEdits = new Map();
-
   context.subscriptions.push(
     provider,
     vscode.window.registerWebviewViewProvider('tab-manager.subWorktreePr', provider),
-    // Both are invoked from the webview's native "…" context menu, which
-    // passes the button's `data-vscode-context` object as the sole argument.
-    vscode.commands.registerCommand(PR_COMMANDS.editTitle, (menu: PrMenuContext) =>
-      editTitle(menu.cwd, menu.prNumber, menu.prTitle, provider),
-    ),
-    vscode.commands.registerCommand(PR_COMMANDS.editDescription, (menu: PrMenuContext) =>
-      editDescription(context, menu.cwd, menu.prNumber, pendingEdits),
-    ),
-    vscode.workspace.onDidSaveTextDocument((document) =>
-      publishSavedDescription(document, pendingEdits),
-    ),
   );
-
   return () => provider.refresh();
 }
 
 /**
  * The "Pull Request" view — a webview, because tree rows have no typography
  * control and the PR title should be big and fully wrapped. Shows the active
- * worktree's PR (looked up from its branch via `gh`) with actions to open,
- * rename, and rewrite its description.
+ * worktree's PR (looked up from its branch via `gh`): what it is, where it
+ * stands, and its description rendered as markdown. Read-only by design —
+ * the one thing it can do to a PR is open it on GitHub, which is where any
+ * editing happens.
  */
 class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private readonly views = new Set<vscode.WebviewView>();
@@ -343,10 +325,6 @@ function renderHtml(render: PrRender, codiconsHref: string): string {
     const badge = PR_WEB_BADGE[visual];
     const mergeability = renderMergeability(pr);
     const checks = renderChecks(pr);
-    // The "…" button opens a native context menu (contributed under
-    // `webview/context` in package.json); its data-vscode-context payload is
-    // what the menu's commands receive.
-    const menuContext: PrMenuContext = { cwd: state.cwd, prNumber: pr.number, prTitle: pr.title };
     content = `
       ${renderDigitStrip(pr.number)}
       <div class="title">${escapeHtml(pr.title)}</div>
@@ -354,14 +332,13 @@ function renderHtml(render: PrRender, codiconsHref: string): string {
         <span class="state" style="color: ${badge.color}">${codicon(PR_TREE_ICON[visual].codicon)}${badge.label}</span>
         <span class="num">#${pr.number}</span>
       </div>
-      <div class="meta muted">target: <code>${escapeHtml(pr.baseRefName)}</code></div>
+      <div class="meta muted branches">
+        <code>${escapeHtml(pr.baseRefName)}</code> &lt;- <code>${escapeHtml(pr.headRefName)}</code>
+      </div>
       ${mergeability ? `<div class="meta">${mergeability}</div>` : ''}
       ${checks ? `<div class="meta">${checks}</div>` : ''}
       <div class="actions">
         <button class="primary" data-cmd="open">Open on GitHub</button>
-        <button class="icon-button" id="more" aria-label="More actions"
-          data-vscode-context="${escapeHtml(JSON.stringify({ webviewSection: 'prActions', preventDefaultContextMenuItems: true, ...menuContext }))}"
-        >${codicon('ellipsis')}</button>
       </div>
       <div class="description">${renderMarkdown(pr.body)}</div>`;
   }
@@ -371,7 +348,13 @@ function renderHtml(render: PrRender, codiconsHref: string): string {
 <head>
 <link rel="stylesheet" href="${codiconsHref}">
 <style>
-  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 8px 12px; }
+  /* The generous bottom padding is the gap to the Files Changed view below —
+     three blank lines' worth, so the file list reads as the continuation of
+     this pane rather than as something crowding the button. */
+  body {
+    font-family: var(--vscode-font-family); color: var(--vscode-foreground);
+    padding: 8px 12px calc(3 * 1.4em) 12px;
+  }
   /* Negative top/right margins cancel the body padding so the strip sits flush
      with the view's top and right edges; the left edge keeps the body padding
      so the swatches line up with the title text below. The inset hairline keeps
@@ -384,6 +367,10 @@ function renderHtml(render: PrRender, codiconsHref: string): string {
   .state .codicon { font-size: 14px; }
   .num { opacity: 0.75; }
   .muted { opacity: 0.75; }
+  /* The branch pair wraps as one run of text rather than as flex items, so a
+     long branch name breaks mid-name instead of forcing the arrow onto its
+     own line. */
+  .branches { display: block; overflow-wrap: anywhere; }
   .description { margin-top: 12px; line-height: 1.5; word-wrap: break-word; }
   .description :first-child { margin-top: 0; }
   .description :last-child { margin-bottom: 0; }
@@ -407,11 +394,6 @@ function renderHtml(render: PrRender, codiconsHref: string): string {
     color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground);
   }
   button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
-  button.icon-button {
-    align-self: center; padding: 3px; display: flex; align-items: center; justify-content: center;
-    color: var(--vscode-icon-foreground); background: transparent; border-radius: 5px;
-  }
-  button.icon-button:hover { background: var(--vscode-toolbar-hoverBackground); }
   code { font-family: var(--vscode-editor-font-family); }
 </style></head>
 <body>
@@ -421,14 +403,6 @@ function renderHtml(render: PrRender, codiconsHref: string): string {
     for (const button of document.querySelectorAll('button[data-cmd]')) {
       button.addEventListener('click', () => api.postMessage({ type: button.dataset.cmd }));
     }
-    // A left-click on "…" opens the button's native context menu (VS Code
-    // builds it from the data-vscode-context attribute).
-    document.getElementById('more')?.addEventListener('click', (event) => {
-      event.currentTarget.dispatchEvent(new MouseEvent('contextmenu', {
-        bubbles: true, clientX: event.clientX, clientY: event.clientY,
-      }));
-      event.stopPropagation();
-    });
   </script>
 </body>
 </html>`;
@@ -439,7 +413,7 @@ function renderHtml(render: PrRender, codiconsHref: string): string {
  * reports conflicts with the base branch, green check when clean. Empty for
  * merged/closed PRs (moot) and while GitHub is still computing (UNKNOWN).
  */
-function renderMergeability(pr: PrInfo): string {
+function renderMergeability(pr: PrSummary): string {
   const visual = prVisualState(pr.state, pr.isDraft);
   if (visual === 'merged' || visual === 'closed') {
     return '';
@@ -498,7 +472,7 @@ export function summarizeChecks(rollup: StatusCheck[] | null): ChecksSummary | u
  * a spinner while checks are running, green check when all passed. Empty for
  * merged/closed PRs and PRs with no checks at all.
  */
-function renderChecks(pr: PrInfo): string {
+function renderChecks(pr: PrSummary): string {
   const visual = prVisualState(pr.state, pr.isDraft);
   if (visual === 'merged' || visual === 'closed') {
     return '';
@@ -611,7 +585,7 @@ function renderMarkdown(markdown: string): string {
  * when there's no PR (or `gh` fails); failures are logged, not surfaced,
  * since this runs speculatively for every worktree row.
  */
-export async function resolveWorktreePr(cwd: string): Promise<PrInfo | undefined> {
+export async function resolveWorktreePr(cwd: string): Promise<PrDetail | undefined> {
   try {
     return await fetchPr(cwd);
   } catch (error) {
@@ -628,7 +602,7 @@ export async function resolveWorktreePr(cwd: string): Promise<PrInfo | undefined
 export async function listOpenPrs(cwd: string): Promise<PrSummary[]> {
   try {
     const stdout = await gh(
-      ['pr', 'list', '--state', 'open', '--limit', '100', '--json', SUMMARY_FIELDS],
+      ['pr', 'list', '--state', 'open', '--limit', '100', '--json', PR_FIELDS],
       cwd,
     );
     return JSON.parse(stdout) as PrSummary[];
@@ -637,77 +611,6 @@ export async function listOpenPrs(cwd: string): Promise<PrSummary[]> {
     return [];
   }
 }
-
-async function editTitle(
-  cwd: string,
-  prNumber: number,
-  currentTitle: string,
-  provider: PrWebviewProvider,
-): Promise<void> {
-  const title = await vscode.window.showInputBox({
-    prompt: `New title for PR #${prNumber}`,
-    value: currentTitle,
-    validateInput: (value) => (value.trim() ? undefined : 'Title cannot be empty'),
-  });
-  if (!title || title === currentTitle) {
-    return;
-  }
-  try {
-    await gh(['pr', 'edit', String(prNumber), '--title', title.trim()], cwd);
-    vscode.window.showInformationMessage(`Renamed PR #${prNumber}.`);
-    provider.refresh();
-  } catch (error) {
-    vscode.window.showErrorMessage(errorMessage(error));
-  }
-}
-
-/**
- * Opens the PR body as a markdown file (in extension storage); every SAVE of
- * that file publishes it back to the PR via `gh pr edit --body-file`.
- */
-async function editDescription(
-  context: vscode.ExtensionContext,
-  cwd: string,
-  prNumber: number,
-  pendingEdits: PendingEdits,
-): Promise<void> {
-  try {
-    const stdout = await gh(['pr', 'view', String(prNumber), '--json', 'body'], cwd);
-    const { body } = JSON.parse(stdout) as { body: string };
-
-    const dir = vscode.Uri.joinPath(context.globalStorageUri, 'pr-edit');
-    await vscode.workspace.fs.createDirectory(dir);
-    const file = vscode.Uri.joinPath(dir, `PR-${prNumber}.md`);
-    await vscode.workspace.fs.writeFile(file, new TextEncoder().encode(body));
-
-    pendingEdits.set(file.fsPath, { cwd, number: prNumber });
-    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(file), {
-      preview: false,
-    });
-    vscode.window.showInformationMessage(
-      `Editing PR #${prNumber} description — save the file to publish it.`,
-    );
-  } catch (error) {
-    vscode.window.showErrorMessage(errorMessage(error));
-  }
-}
-
-async function publishSavedDescription(
-  document: vscode.TextDocument,
-  pendingEdits: PendingEdits,
-): Promise<void> {
-  const edit = pendingEdits.get(document.uri.fsPath);
-  if (!edit) {
-    return;
-  }
-  try {
-    await gh(['pr', 'edit', String(edit.number), '--body-file', document.uri.fsPath], edit.cwd);
-    vscode.window.showInformationMessage(`Updated PR #${edit.number} description.`);
-  } catch (error) {
-    vscode.window.showErrorMessage(errorMessage(error));
-  }
-}
-
 async function lookUpPr(cwd: string): Promise<PrLookup> {
   try {
     return { kind: 'pr', pr: await fetchPr(cwd) };

@@ -11,6 +11,11 @@ export interface FolderRef {
 
 const CLAUDE_WORKTREES_DIR = '.claude/worktrees';
 
+/** Where a pull request's worktree lives, whether or not it has been created. */
+export function worktreePathForPr(repoRoot: string, prNumber: number): string {
+  return path.join(repoRoot, CLAUDE_WORKTREES_DIR, String(prNumber));
+}
+
 /**
  * Creates a new worktree for the repo under `.claude/worktrees/<name>` — the
  * same convention discovery scans — on a new branch of the same name. Returns
@@ -34,7 +39,7 @@ export async function addWorktree(repoRoot: string, name: string): Promise<strin
  * fork remotes. A failed checkout removes the half-made worktree again.
  */
 export async function addWorktreeForPr(repoRoot: string, prNumber: number): Promise<string> {
-  const worktreePath = path.join(repoRoot, CLAUDE_WORKTREES_DIR, String(prNumber));
+  const worktreePath = worktreePathForPr(repoRoot, prNumber);
   try {
     await git(['worktree', 'add', '--detach', worktreePath], repoRoot);
   } catch (error) {

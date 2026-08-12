@@ -3,7 +3,7 @@ import { registerCommands } from './commands';
 import { registerFileCommands } from './fileCommands';
 import { registerPrView } from './pr';
 import { rememberOpenRepos } from './repos';
-import { RootWorktreeManager } from './rootWorktreeManager';
+import { RootWorktreeManager, WorktreeRowDecorationProvider } from './rootWorktreeManager';
 import { LayoutStore } from './store';
 import { ChangedFileDecorationProvider, SubWorktreeManager } from './subWorktreeManager';
 import { isSubWorktreeWindow } from './worktrees';
@@ -43,20 +43,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // worktree is what puts that worktree's repository on the list.
   void rememberOpenRepos();
 
-  // createTreeView (not registerTreeDataProvider) so the provider can select
-  // the row for the worktree this window is on.
-  const rootView = vscode.window.createTreeView('tab-manager.rootWorktrees', {
-    treeDataProvider: rootManager,
-  });
-  rootManager.attachView(rootView);
-
   context.subscriptions.push(
     store,
     rootManager,
     subManager,
-    rootView,
     vscode.workspace.onDidChangeWorkspaceFolders(() => void rememberOpenRepos()),
     vscode.window.registerFileDecorationProvider(new ChangedFileDecorationProvider()),
+    vscode.window.registerFileDecorationProvider(new WorktreeRowDecorationProvider()),
+    vscode.window.registerTreeDataProvider('tab-manager.rootWorktrees', rootManager),
     // The Files view's title toggle — one of the two shows at a time, gated
     // on the tabManager.filesExpanded context key.
     vscode.commands.registerCommand('tabManager.filesExpandAll', () =>

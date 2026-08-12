@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { errorMessage } from './cli';
 import { log } from './log';
-import { listOpenPrs, resolveWorktreePr } from './pr';
+import { resolveWorktreePr } from './pr';
 import { addConfiguredRepos, removeConfiguredRepo } from './repos';
 import type { BranchElement, RepoSection } from './rootWorktreeManager';
 import {
@@ -19,7 +19,6 @@ export const COMMANDS = {
   openWindow: 'tabManager.openWorktreeWindow',
   copyPath: 'tabManager.copyWorktreePath',
   newWorktreeBlank: 'tabManager.newWorktreeBlank',
-  newWorktreeFromPr: 'tabManager.newWorktreeFromPr',
   newWorktreeForPr: 'tabManager.newWorktreeForPr',
   deleteWorktree: 'tabManager.deleteWorktree',
   switchWorktree: 'tabManager.switchWorktree',
@@ -45,19 +44,16 @@ export function registerCommands(
       return vscode.env.clipboard.writeText(vscode.Uri.parse(row.folderUri).fsPath);
     }
   });
-  // Both live in the repo row's "+" dropdown (a native submenu, contributed
-  // in package.json), so each command is one flavor — no chooser step.
+  // The repo row's inline "+". Creating a worktree for a pull request has its
+  // own way in: clicking the PR's row in the tree.
   register(COMMANDS.newWorktreeBlank, (section: RepoSection) =>
     createNewWorktree(section, refreshWorktrees),
-  );
-  register(COMMANDS.newWorktreeFromPr, (section: RepoSection) =>
-    createWorktreeFromPr(section, refreshWorktrees),
   );
   // What clicking a pull request that has no worktree yet runs: create the
   // worktree, then open it, so the click lands in the same place as a click on
   // a row whose worktree already exists.
   register(COMMANDS.newWorktreeForPr, (repoRoot: string, prNumber: number) =>
-    createWorktreeForPr(repoRoot, prNumber, refreshWorktrees, true),
+    createWorktreeForPr(repoRoot, prNumber, refreshWorktrees),
   );
   register(COMMANDS.deleteWorktree, (row: BranchElement) => deleteWorktree(row, refreshWorktrees));
   register(COMMANDS.switchWorktree, () => switchWorktree());
@@ -201,46 +197,15 @@ async function createNewWorktree(
 }
 
 /**
- * Picks (searchably) one of the repo's open PRs and creates a worktree named
- * after its number with the PR's branch checked out — the row then shows the
- * PR title via the branch-based `gh` lookup.
- */
-async function createWorktreeFromPr(
-  section: RepoSection,
-  refreshWorktrees: () => void,
-): Promise<void> {
-  const prs = await listOpenPrs(section.repoRoot);
-  if (prs.length === 0) {
-    vscode.window.showInformationMessage(
-      `No open pull requests found for ${section.label} (is the GitHub CLI signed in?).`,
-    );
-    return;
-  }
-
-  const pick = await vscode.window.showQuickPick(
-    prs.map((pr) => ({ label: `#${pr.number} ${pr.title}`, description: pr.headRefName, pr })),
-    { placeHolder: 'Search a pull request…', matchOnDescription: true },
-  );
-  if (!pick) {
-    return;
-  }
-  await createWorktreeForPr(section.repoRoot, pick.pr.number, refreshWorktrees, false);
-}
-
-/**
  * Creates the worktree for one pull request, named after its number under
- * `.claude/worktrees/` with the PR's branch checked out.
- *
- * `openWindow` is what separates the two callers: clicking a pull request row
- * is a request to *go there*, so it opens the new worktree's window the way
- * clicking a row that already has one does, while the "New Worktree from PR"
- * picker only creates it and leaves the user where they were.
+ * `.claude/worktrees/` with the PR's branch checked out, and opens it — this
+ * is what clicking a pull request row that has no worktree does, and the click
+ * is a request to *go there*, same as on a row that already has one.
  */
 async function createWorktreeForPr(
   repoRoot: string,
   prNumber: number,
   refreshWorktrees: () => void,
-  openWindow: boolean,
 ): Promise<void> {
   let worktreePath: string;
   try {
@@ -257,17 +222,11 @@ async function createWorktreeForPr(
   }
 
   refreshWorktrees();
-  if (openWindow) {
-    // The window opening is the confirmation — a notification on top of it
-    // would just be in the way.
-    await vscode.commands.executeCommand(
-      COMMANDS.openWindow,
-      vscode.Uri.file(worktreePath).toString(),
-    );
-    return;
-  }
-  vscode.window.showInformationMessage(
-    `Created worktree "${prNumber}" with PR #${prNumber} checked out.`,
+  // The window opening is the confirmation — a notification on top of it would
+  // just be in the way.
+  await vscode.commands.executeCommand(
+    COMMANDS.openWindow,
+    vscode.Uri.file(worktreePath).toString(),
   );
 }
 

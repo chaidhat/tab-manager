@@ -55,6 +55,48 @@ export interface LoadingElement {
 
 export type TreeElement = RepoSection | BranchElement | LoadingElement;
 
+// How a row asks to be colored: a marker in its resourceUri query, which file
+// decorations then turn into a color. Decorations are the only way the Tree API
+// colors a row's text, and the marker keeps it to this view — nothing else in
+// VS Code will ever hand out a URI carrying it.
+const ROW_QUERY_KEY = 'tabManagerRow';
+type RowMark = 'active' | 'healthy' | 'broken';
+// Red and green are the Explorer's own, so a worktree in trouble reads in the
+// same red git gives a deleted file and a clean one in the same green it gives
+// an added file. The blue is an exact shade, which a decoration can only take
+// as a registered id — hence the one color contributed in package.json.
+const ROW_DECORATION: Record<RowMark, vscode.FileDecoration> = {
+  active: new vscode.FileDecoration(
+    undefined,
+    'The worktree this window is on',
+    new vscode.ThemeColor('tabManager.worktreeActive'),
+  ),
+  healthy: new vscode.FileDecoration(
+    undefined,
+    'Checked out on disk',
+    new vscode.ThemeColor('gitDecoration.addedResourceForeground'),
+  ),
+  broken: new vscode.FileDecoration(
+    undefined,
+    'Checked out on disk — failing checks or conflicts',
+    new vscode.ThemeColor('gitDecoration.deletedResourceForeground'),
+  ),
+};
+
+/**
+ * Colors the rows whose worktree exists on disk — the ones that are somewhere
+ * you can go: blue for the one this window is on, red when its pull request
+ * has a failing check or conflicts, green when it is clean. A pull request
+ * with no worktree carries no decoration at all and stays the plain
+ * foreground, which is the black it should be.
+ */
+export class WorktreeRowDecorationProvider implements vscode.FileDecorationProvider {
+  provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
+    const [key, mark] = uri.query.split('=');
+    return key === ROW_QUERY_KEY ? ROW_DECORATION[mark as RowMark] : undefined;
+  }
+}
+
 function isRepoSection(element: TreeElement): element is RepoSection {
   return 'repoRoot' in element && !('children' in element);
 }
@@ -74,10 +116,11 @@ function isLoading(element: TreeElement): element is LoadingElement {
  * PRs reads as a stack. The repositories are the saved list, kept in global VS
  * Code settings, so every window shows the same ones.
  *
- * A row carries the PR's state and number (`OPEN - #808`); its title and CI
- * status hang under it as their own rows, since a tree row cannot wrap. A row
- * with a worktree opens it in a new window; a row without one creates the
- * worktree first, exactly as "New Worktree from PR" would.
+ * A row says everything on one line (`O TP #806: refactor(evals): …` — see
+ * {@link prLabel}), is emphasized when its worktree exists on disk, and turns
+ * green for the worktree this window is on. Clicking it opens that worktree in
+ * a new window, or — when there is none — creates it first, exactly as "New
+ * Worktree from PR" would.
  */
 export class RootWorktreeManager
   implements vscode.TreeDataProvider<TreeElement>, vscode.Disposable
@@ -90,21 +133,14 @@ export class RootWorktreeManager
   // tree (which VS Code does often) doesn't re-spawn `gh`.
   private readonly rows = new Map<string, BranchElement[]>();
   private readonly loading = new Set<string>();
-  // Section objects are cached, not rebuilt per render, because reveal() needs
-  // the very element instances the tree was given — a fresh object with the
-  // same contents is a different element as far as VS Code is concerned.
+  // Section objects are cached rather than rebuilt per render: VS Code keys
+  // its element map on identity, and handing it a fresh object with the same
+  // contents on every render makes it a different element each time.
   private readonly sections = new Map<string, RepoSection>();
-  /** Row -> the row above it, the parent chain reveal() walks. */
-  private readonly parents = new Map<TreeElement, TreeElement>();
-  /** The view handle, for selecting the worktree this window is on. */
-  private view: vscode.TreeView<TreeElement> | undefined;
 
   constructor(private readonly store: LayoutStore) {
     this.subscriptions = [
-      store.onDidChange(() => {
-        this.emitter.fire();
-        this.selectActiveWorktree();
-      }),
+      store.onDidChange(() => this.emitter.fire()),
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.emitter.fire()),
       // Re-render, rather than refresh(): adding or removing one repository
       // says nothing about the others, whose rows stay valid.
@@ -119,14 +155,7 @@ export class RootWorktreeManager
    */
   refresh(): void {
     this.rows.clear();
-    this.parents.clear();
     this.emitter.fire();
-  }
-
-  /** Hooks up the TreeView, the only handle that can select a row. */
-  attachView(view: vscode.TreeView<TreeElement>): void {
-    this.view = view;
-    this.selectActiveWorktree();
   }
 
   // Synchronous: every `gh`/`git` call happens in load(), so the tree paints
@@ -140,9 +169,7 @@ export class RootWorktreeManager
       const rows = this.rows.get(element.repoRoot);
       if (!rows) {
         this.load(element.repoRoot);
-        const loading: LoadingElement = { loadingFor: element.id };
-        this.parents.set(loading, element);
-        return [loading];
+        return [{ loadingFor: element.id }];
       }
       return rows;
     }
@@ -150,11 +177,6 @@ export class RootWorktreeManager
       return element.children;
     }
     return [];
-  }
-
-  /** The parent chain, which is what {@link vscode.TreeView.reveal} walks. */
-  getParent(element: TreeElement): TreeElement | undefined {
-    return this.parents.get(element);
   }
 
   private section(repoRoot: string): RepoSection {
@@ -191,62 +213,14 @@ export class RootWorktreeManager
       })
       .then((rows) => {
         this.rows.set(repoRoot, rows);
-        this.recordParents(rows, this.section(repoRoot));
         this.loading.delete(repoRoot);
         this.emitter.fire();
-        this.selectActiveWorktree();
       });
   }
 
-  private recordParents(rows: readonly BranchElement[], parent: TreeElement): void {
-    for (const row of rows) {
-      this.parents.set(row, parent);
-      this.recordParents(row.children, row);
-    }
-  }
-
-  /**
-   * Selects the row for the worktree this window is on, so the Root Worktree
-   * Manager shows where you are the same way the Sub Worktree Manager does.
-   * Real list selection — the Tree API has no way to tint a single row — which
-   * also means clicking another row moves it until the next refresh.
-   */
-  private selectActiveWorktree(): void {
-    const active =
-      this.store.activeFolderUri ?? vscode.workspace.workspaceFolders?.[0]?.uri.toString();
-    if (!active || !this.view) {
-      return;
-    }
-    const row = this.findRow(active);
-    if (!row) {
-      return; // its repository is not on the list, or has not loaded yet
-    }
-    this.view.reveal(row, { select: true, focus: false }).then(undefined, (error: unknown) => {
-      log(`tree: could not select the active worktree — ${errorMessage(error)}`);
-    });
-  }
-
-  /** The row backed by a given worktree folder, at any nesting depth. */
-  private findRow(folderUri: string): BranchElement | undefined {
-    const search = (rows: readonly BranchElement[]): BranchElement | undefined => {
-      for (const row of rows) {
-        if (row.folderUri === folderUri) {
-          return row;
-        }
-        const nested = search(row.children);
-        if (nested) {
-          return nested;
-        }
-      }
-      return undefined;
-    };
-    for (const rows of this.rows.values()) {
-      const found = search(rows);
-      if (found) {
-        return found;
-      }
-    }
-    return undefined;
+  /** The worktree this window is on — the one the tree marks as "you are here". */
+  private activeFolderUri(): string | undefined {
+    return this.store.activeFolderUri ?? vscode.workspace.workspaceFolders?.[0]?.uri.toString();
   }
 
   getTreeItem(element: TreeElement): vscode.TreeItem {
@@ -268,25 +242,32 @@ export class RootWorktreeManager
 
   private branchItem(element: BranchElement): vscode.TreeItem {
     const pr = element.pr;
-    const text = pr ? prLabel(pr) : element.name;
-    // Rows backed by a worktree on disk are emphasized. A highlight range over
-    // the whole label is the only way the Tree API can weight a row's text.
-    const label: vscode.TreeItemLabel = element.folderUri
-      ? { label: text, highlights: [[0, text.length]] }
-      : { label: text };
+    const isActive =
+      element.folderUri !== undefined && element.folderUri === this.activeFolderUri();
     const item = new vscode.TreeItem(
-      label,
+      pr ? prLabel(pr) : element.name,
       element.children.length > 0
         ? vscode.TreeItemCollapsibleState.Expanded
         : vscode.TreeItemCollapsibleState.None,
     );
     item.id = element.id;
 
-    // A PR gets its digit-color strip as the icon — the same PR-number encoding
-    // shown atop the PR view.
-    if (pr) {
-      item.iconPath = prDigitStripIcon(pr.number);
+    // The marker query is what WorktreeRowDecorationProvider colors the row
+    // from; the worktree's own folder carries it. A row with no worktree gets
+    // no resourceUri at all — nothing to color, and nothing to decorate.
+    const mark = rowMark(element, isActive);
+    if (mark && element.folderUri) {
+      item.resourceUri = vscode.Uri.parse(element.folderUri).with({
+        query: `${ROW_QUERY_KEY}=${mark}`,
+      });
     }
+
+    // A PR gets its digit-color strip as the icon — the same PR-number encoding
+    // shown atop the PR view. Every other row gets an explicit icon too, since
+    // a row carrying a resourceUri would otherwise pull in a file-type icon.
+    item.iconPath = pr
+      ? prDigitStripIcon(pr.number)
+      : new vscode.ThemeIcon(element.isRoot ? 'repo' : 'folder');
     if (pr && !element.folderUri) {
       item.description = 'no worktree';
     }
@@ -346,24 +327,41 @@ export class RootWorktreeManager
 }
 
 /**
- * A pull request row's label, all on one line:
- * `OPEN (TC) #798: feat(web): Zod request schemas`.
- *
- * The bracket only appears when something is wrong — `T` when checks are
- * failing, `C` when GitHub reports a conflict with the base branch, `TC` for
- * both. A PR that is fine reads `OPEN #798: …` with nothing in between, so the
- * eye only has to catch the rows that do carry a warning. Merged and closed PRs
- * never carry one: both signals are moot by then.
+ * A pull request row's label, all on one line, in as few characters as it can
+ * be said — everything spent here is title the row cannot show:
+ * `O #798: feat(web): Zod request schemas`. The state leads: O open, D draft,
+ * M merged, C closed. Everything else the row has to say, it says in color.
  */
 function prLabel(pr: PrSummary): string {
-  const visual = prVisualState(pr.state, pr.isDraft);
-  let warning = '';
-  if (visual !== 'merged' && visual !== 'closed') {
-    const failing = (summarizeChecks(pr.statusCheckRollup)?.failed ?? 0) > 0 ? 'T' : '';
-    const conflicting = pr.mergeable?.toUpperCase() === 'CONFLICTING' ? 'C' : '';
-    warning = failing || conflicting ? ` (${failing}${conflicting})` : '';
+  return `${prStateLabel(prVisualState(pr.state, pr.isDraft))} #${pr.number}: ${pr.title}`;
+}
+
+/**
+ * How a row is colored. Only a worktree that exists on disk gets a color of
+ * its own, since only those are somewhere you can go: blue for the one this
+ * window is on, red when its pull request has a failing check or conflicts
+ * with its base branch, green when it is clean.
+ */
+function rowMark(element: BranchElement, isActive: boolean): RowMark | undefined {
+  if (!element.folderUri) {
+    return undefined; // nothing on disk to be in any state
   }
-  return `${prStateLabel(visual)}${warning} #${pr.number}: ${pr.title}`;
+  if (isActive) {
+    return 'active';
+  }
+  return element.pr && needsAttention(element.pr) ? 'broken' : 'healthy';
+}
+
+/** Whether a PR is in trouble — a failing check, or a conflict with its base. */
+function needsAttention(pr: PrSummary): boolean {
+  const visual = prVisualState(pr.state, pr.isDraft);
+  if (visual === 'merged' || visual === 'closed') {
+    return false; // neither signal means anything once a PR is done
+  }
+  return (
+    (summarizeChecks(pr.statusCheckRollup)?.failed ?? 0) > 0 ||
+    pr.mergeable?.toUpperCase() === 'CONFLICTING'
+  );
 }
 
 /** A worktree folder and the branch it currently has checked out. */
