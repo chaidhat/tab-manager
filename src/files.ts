@@ -7,10 +7,14 @@ export interface FileEntry {
   readonly isDirectory: boolean;
 }
 
+/** The Files tree's row order: folders first, then files, each alphabetical. */
+export function compareEntries(a: FileEntry, b: FileEntry): number {
+  return a.isDirectory === b.isDirectory ? a.name.localeCompare(b.name) : a.isDirectory ? -1 : 1;
+}
+
 /**
- * Lists a directory's contents for the Files tree: folders first, then files,
- * both alphabetical, skipping `.git`. Returns an empty list if the directory
- * can't be read (e.g. it was deleted).
+ * Lists a directory's contents for the Files tree, skipping `.git`. Returns an
+ * empty list if the directory can't be read (e.g. it was deleted).
  */
 export async function listDirectory(dirUri: vscode.Uri): Promise<FileEntry[]> {
   let entries: [string, vscode.FileType][];
@@ -27,7 +31,5 @@ export async function listDirectory(dirUri: vscode.Uri): Promise<FileEntry[]> {
       name,
       isDirectory: (type & vscode.FileType.Directory) !== 0,
     }))
-    .sort((a, b) =>
-      a.isDirectory === b.isDirectory ? a.name.localeCompare(b.name) : a.isDirectory ? -1 : 1,
-    );
+    .sort(compareEntries);
 }

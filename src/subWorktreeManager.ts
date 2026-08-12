@@ -1,8 +1,9 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { git } from './cli';
+import { changedLineCounts, DiffStat, totalsByDirectory } from './diffStats';
 import { OPEN_DIFF } from './fileCommands';
-import { FileEntry, listDirectory } from './files';
+import { compareEntries, FileEntry, listDirectory } from './files';
 import {
   changedFilesVsBranch,
   ensureRepositoryOpen,
@@ -61,6 +62,45 @@ export class ChangedFileDecorationProvider implements vscode.FileDecorationProvi
 }
 
 /**
+ * Groups changed paths into tree rows keyed by their parent directory, adding
+ * a row for every ancestor directory up to `root`. Built from the change set
+ * rather than from a directory listing so paths that no longer exist on disk
+ * still get rows — a deleted file, or a directory that was deleted wholesale.
+ */
+function buildChangedTree(root: vscode.Uri, files: Iterable<string>): Map<string, FileEntry[]> {
+  const rootPrefix = root.fsPath.endsWith(path.sep) ? root.fsPath : root.fsPath + path.sep;
+  const children = new Map<string, FileEntry[]>();
+  const added = new Set<string>();
+  for (const file of files) {
+    let isDirectory = false;
+    let fsPath = file;
+    // Walk up to the root. Once a path is already in the tree so are all of
+    // its ancestors, so the rest of the walk can be skipped.
+    while (fsPath.startsWith(rootPrefix) && !added.has(fsPath)) {
+      added.add(fsPath);
+      const parent = path.dirname(fsPath);
+      const entry: FileEntry = {
+        uri: vscode.Uri.file(fsPath),
+        name: path.basename(fsPath),
+        isDirectory,
+      };
+      const siblings = children.get(parent);
+      if (siblings) {
+        siblings.push(entry);
+      } else {
+        children.set(parent, [entry]);
+      }
+      isDirectory = true;
+      fsPath = parent;
+    }
+  }
+  for (const siblings of children.values()) {
+    siblings.sort(compareEntries);
+  }
+  return children;
+}
+
+/**
  * The Sub Worktree Manager container's "Files Changed" view: the active worktree's
  * file tree, and only that worktree's — unlike the built-in Explorer, which
  * has no way to scope a multi-root workspace down to one root. Rows carry a
@@ -73,8 +113,10 @@ export class ChangedFileDecorationProvider implements vscode.FileDecorationProvi
  * The tree is filtered to files that differ from the worktree's PR base
  * branch — the branch the PR merges into, resolved via `gh` — falling back
  * to the repo's default branch when there's no PR (merge-base semantics plus
- * uncommitted changes). Folders show only while they contain changed files.
- * When the comparison can't be made, the full tree is shown instead.
+ * uncommitted changes). Folders show only while they contain changed files,
+ * and deleted files (or folders) are listed too, even though nothing on disk
+ * backs them. Each changed file also carries its `+added -deleted` line counts.
+ * When the comparison can't be made, the full tree is shown from disk instead.
  */
 export class SubWorktreeManager
   implements vscode.TreeDataProvider<FilesElement>, vscode.Disposable
@@ -88,7 +130,12 @@ export class SubWorktreeManager
   private repoSubscription: vscode.Disposable | undefined;
   private repoRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   private changedFiles: Map<string, FileChange> | undefined;
-  private changedDirs: Set<string> | undefined;
+  /** Line counts for the changed files, for the "+12 -3" row description. */
+  private changedStats: Map<string, DiffStat> | undefined;
+  /** The same counts rolled up per directory, for the folder rows. */
+  private changedDirStats: Map<string, DiffStat> | undefined;
+  /** Filtered rows keyed by parent dir; undefined while the filter is off. */
+  private changedChildren: Map<string, FileEntry[]> | undefined;
   /** The view handle, for the "Files Changed (N)" title. */
   private view: vscode.TreeView<FilesElement> | undefined;
   private compareBase: string | undefined;
@@ -226,30 +273,12 @@ export class SubWorktreeManager
   }
 
   private async listChildren(dirUri: vscode.Uri): Promise<FileEntry[]> {
-    const entries = await listDirectory(dirUri);
-    let filtered = entries;
-    if (this.changedFiles && this.changedDirs) {
-      filtered = entries.filter((entry) =>
-        entry.isDirectory
-          ? this.changedDirs!.has(entry.uri.fsPath)
-          : this.changedFiles!.has(entry.uri.fsPath),
-      );
-      // Deleted files are gone from disk, so the listing can't surface them —
-      // synthesize their rows from the changed set.
-      for (const [fsPath, change] of this.changedFiles) {
-        if (change.kind === 'deleted' && path.dirname(fsPath) === dirUri.fsPath) {
-          filtered.push({
-            uri: vscode.Uri.file(fsPath),
-            name: path.basename(fsPath),
-            isDirectory: false,
-          });
-        }
-      }
-      filtered.sort((a, b) =>
-        a.isDirectory === b.isDirectory ? a.name.localeCompare(b.name) : a.isDirectory ? -1 : 1,
-      );
-    }
-    return Promise.all(filtered.map((entry) => this.compressChain(entry)));
+    // While the filter is on the rows come from the change set rather than
+    // from disk, so deleted paths are listed alongside the ones still there.
+    const entries = this.changedChildren
+      ? (this.changedChildren.get(dirUri.fsPath) ?? [])
+      : await listDirectory(dirUri);
+    return Promise.all(entries.map((entry) => this.compressChain(entry)));
   }
 
   /**
@@ -280,7 +309,9 @@ export class SubWorktreeManager
   /** Refreshes the changed-file set (and the folders containing them). */
   private async recomputeChangedSet(root: vscode.Uri): Promise<void> {
     this.changedFiles = undefined;
-    this.changedDirs = undefined;
+    this.changedStats = undefined;
+    this.changedDirStats = undefined;
+    this.changedChildren = undefined;
     this.compareBase = undefined;
     this.compareLabel = undefined;
     const branch = await this.compareRef(root);
@@ -294,18 +325,12 @@ export class SubWorktreeManager
       return; // fall back to the unfiltered listing rather than hiding everything
     }
 
-    const dirs = new Set<string>();
-    for (const file of comparison.files.keys()) {
-      let dir = path.dirname(file);
-      while (dir.length > root.fsPath.length && dir.startsWith(root.fsPath) && !dirs.has(dir)) {
-        dirs.add(dir);
-        dir = path.dirname(dir);
-      }
-    }
     this.changedFiles = comparison.files;
-    this.changedDirs = dirs;
+    this.changedChildren = buildChangedTree(root, comparison.files.keys());
     this.compareBase = comparison.base;
     this.compareLabel = branch;
+    this.changedStats = await changedLineCounts(root, comparison.base, comparison.files);
+    this.changedDirStats = totalsByDirectory(root, this.changedStats);
   }
 
   /**
@@ -378,6 +403,16 @@ export class SubWorktreeManager
     );
     item.resourceUri = node.uri;
     item.contextValue = node.isDirectory ? 'fileDirectory' : 'fileLeaf';
+    // A file's own counts; a folder's are everything changed beneath it. Tree
+    // rows can't color part of their text, so the two counts can't be
+    // green/red — they ride in the description slot, and the status badge stays
+    // the row's one splash of color.
+    const stat = node.isDirectory
+      ? this.changedDirStats?.get(node.uri.fsPath)
+      : this.changedStats?.get(node.uri.fsPath);
+    if (stat) {
+      item.description = `+${stat.added} -${stat.deleted}`;
+    }
     if (node.isDirectory) {
       // See setExpandAll — the generation forces the default state to re-apply.
       item.id = `${this.expandGeneration}:${node.uri.toString()}`;

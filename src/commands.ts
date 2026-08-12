@@ -1,9 +1,10 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { errorMessage } from './cli';
 import { log } from './log';
 import { listOpenPrs, resolveWorktreePr } from './pr';
-import type { RepoSection } from './rootWorktreeManager';
-import { WorktreeElement } from './types';
+import { addConfiguredRepos, removeConfiguredRepo } from './repos';
+import type { BranchElement, RepoSection } from './rootWorktreeManager';
 import {
   addWorktree,
   addWorktreeForPr,
@@ -19,8 +20,11 @@ export const COMMANDS = {
   copyPath: 'tabManager.copyWorktreePath',
   newWorktreeBlank: 'tabManager.newWorktreeBlank',
   newWorktreeFromPr: 'tabManager.newWorktreeFromPr',
+  newWorktreeForPr: 'tabManager.newWorktreeForPr',
   deleteWorktree: 'tabManager.deleteWorktree',
   switchWorktree: 'tabManager.switchWorktree',
+  addRepository: 'tabManager.addRepository',
+  removeRepository: 'tabManager.removeRepository',
 } as const;
 
 export function registerCommands(
@@ -36,25 +40,85 @@ export function registerCommands(
       forceNewWindow: true,
     });
   });
-  register(COMMANDS.copyPath, (worktree: WorktreeElement) =>
-    vscode.env.clipboard.writeText(vscode.Uri.parse(worktree.folderUri).fsPath),
-  );
+  register(COMMANDS.copyPath, (row: BranchElement) => {
+    if (row.folderUri) {
+      return vscode.env.clipboard.writeText(vscode.Uri.parse(row.folderUri).fsPath);
+    }
+  });
   // Both live in the repo row's "+" dropdown (a native submenu, contributed
   // in package.json), so each command is one flavor — no chooser step.
-  register(COMMANDS.newWorktreeBlank, (section: RepoSection) => {
-    if (section.repoRoot) {
-      return createNewWorktree({ ...section, repoRoot: section.repoRoot }, refreshWorktrees);
-    }
-  });
-  register(COMMANDS.newWorktreeFromPr, (section: RepoSection) => {
-    if (section.repoRoot) {
-      return createWorktreeFromPr({ ...section, repoRoot: section.repoRoot }, refreshWorktrees);
-    }
-  });
-  register(COMMANDS.deleteWorktree, (worktree: WorktreeElement) =>
-    deleteWorktree(worktree, refreshWorktrees),
+  register(COMMANDS.newWorktreeBlank, (section: RepoSection) =>
+    createNewWorktree(section, refreshWorktrees),
   );
+  register(COMMANDS.newWorktreeFromPr, (section: RepoSection) =>
+    createWorktreeFromPr(section, refreshWorktrees),
+  );
+  // What clicking a pull request that has no worktree yet runs: create the
+  // worktree, then open it, so the click lands in the same place as a click on
+  // a row whose worktree already exists.
+  register(COMMANDS.newWorktreeForPr, (repoRoot: string, prNumber: number) =>
+    createWorktreeForPr(repoRoot, prNumber, refreshWorktrees, true),
+  );
+  register(COMMANDS.deleteWorktree, (row: BranchElement) => deleteWorktree(row, refreshWorktrees));
   register(COMMANDS.switchWorktree, () => switchWorktree());
+  // Both edit the saved repository list; the view re-renders off the resulting
+  // settings change, so neither refreshes it itself.
+  register(COMMANDS.addRepository, () => addRepository());
+  register(COMMANDS.removeRepository, (section: RepoSection) => removeRepository(section));
+}
+
+/**
+ * Adds one or more repositories to the Root Worktree Manager, so their
+ * worktrees are listed without their folders being open in this window. The
+ * pick is resolved to the repository root, so choosing a worktree (or the repo
+ * itself) both land on the same entry.
+ */
+async function addRepository(): Promise<void> {
+  const picks = await vscode.window.showOpenDialog({
+    canSelectFiles: false,
+    canSelectFolders: true,
+    canSelectMany: true,
+    openLabel: 'Add Repository',
+    title: 'Add a repository to the Root Worktree Manager',
+  });
+  if (!picks || picks.length === 0) {
+    return;
+  }
+
+  const repoRoots: string[] = [];
+  const notRepos: string[] = [];
+  for (const pick of picks) {
+    const repoRoot = await repoRootOf(pick);
+    if (repoRoot === undefined) {
+      notRepos.push(path.basename(pick.fsPath));
+    } else {
+      repoRoots.push(repoRoot);
+    }
+  }
+
+  const added = await addConfiguredRepos(repoRoots);
+  if (notRepos.length > 0) {
+    vscode.window.showWarningMessage(`Not a git repository: ${notRepos.join(', ')}.`);
+  }
+  if (added.length > 0) {
+    vscode.window.showInformationMessage(
+      `Added ${added.map((repoRoot) => path.basename(repoRoot)).join(', ')} to the Root Worktree Manager.`,
+    );
+  } else if (repoRoots.length > 0) {
+    vscode.window.showInformationMessage('Already in the Root Worktree Manager.');
+  }
+}
+
+/**
+ * Drops a repository from the saved list, in this window and every other one.
+ * Nothing on disk is touched — and since the list is what windows add
+ * themselves to, opening one of the repository's folders puts it back.
+ */
+async function removeRepository(section: RepoSection): Promise<void> {
+  if (!section?.repoRoot) {
+    return;
+  }
+  await removeConfiguredRepo(section.repoRoot);
 }
 
 /**
@@ -114,7 +178,7 @@ async function switchWorktree(): Promise<void> {
  * branch of the same name, and refreshes the sidebar so it appears.
  */
 async function createNewWorktree(
-  section: RepoSection & { repoRoot: string },
+  section: RepoSection,
   refreshWorktrees: () => void,
 ): Promise<void> {
   const name = await vscode.window.showInputBox({
@@ -142,7 +206,7 @@ async function createNewWorktree(
  * PR title via the branch-based `gh` lookup.
  */
 async function createWorktreeFromPr(
-  section: RepoSection & { repoRoot: string },
+  section: RepoSection,
   refreshWorktrees: () => void,
 ): Promise<void> {
   const prs = await listOpenPrs(section.repoRoot);
@@ -160,22 +224,51 @@ async function createWorktreeFromPr(
   if (!pick) {
     return;
   }
+  await createWorktreeForPr(section.repoRoot, pick.pr.number, refreshWorktrees, false);
+}
 
+/**
+ * Creates the worktree for one pull request, named after its number under
+ * `.claude/worktrees/` with the PR's branch checked out.
+ *
+ * `openWindow` is what separates the two callers: clicking a pull request row
+ * is a request to *go there*, so it opens the new worktree's window the way
+ * clicking a row that already has one does, while the "New Worktree from PR"
+ * picker only creates it and leaves the user where they were.
+ */
+async function createWorktreeForPr(
+  repoRoot: string,
+  prNumber: number,
+  refreshWorktrees: () => void,
+  openWindow: boolean,
+): Promise<void> {
+  let worktreePath: string;
   try {
-    await vscode.window.withProgress(
+    worktreePath = await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: `Creating worktree for #${pick.pr.number}…`,
+        title: `Creating worktree for #${prNumber}…`,
       },
-      () => addWorktreeForPr(section.repoRoot, pick.pr.number),
-    );
-    refreshWorktrees();
-    vscode.window.showInformationMessage(
-      `Created worktree "${pick.pr.number}" with PR #${pick.pr.number} checked out.`,
+      () => addWorktreeForPr(repoRoot, prNumber),
     );
   } catch (error) {
     vscode.window.showErrorMessage(errorMessage(error));
+    return;
   }
+
+  refreshWorktrees();
+  if (openWindow) {
+    // The window opening is the confirmation — a notification on top of it
+    // would just be in the way.
+    await vscode.commands.executeCommand(
+      COMMANDS.openWindow,
+      vscode.Uri.file(worktreePath).toString(),
+    );
+    return;
+  }
+  vscode.window.showInformationMessage(
+    `Created worktree "${prNumber}" with PR #${prNumber} checked out.`,
+  );
 }
 
 /**
@@ -189,10 +282,16 @@ async function createWorktreeFromPr(
  * files sit recoverable in the trash until the user empties it.
  */
 async function deleteWorktree(
-  worktree: WorktreeElement,
+  worktree: BranchElement,
   refreshWorktrees: () => void,
 ): Promise<void> {
-  if (worktree.isOpen) {
+  if (!worktree.folderUri) {
+    return; // a pull request with no worktree — nothing to delete
+  }
+  const isOpen = (vscode.workspace.workspaceFolders ?? []).some(
+    (folder) => folder.uri.toString() === worktree.folderUri,
+  );
+  if (isOpen) {
     vscode.window.showWarningMessage(
       'This worktree is open in the workspace — remove it from the workspace first.',
     );

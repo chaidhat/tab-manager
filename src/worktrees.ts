@@ -9,74 +9,7 @@ export interface FolderRef {
   readonly name: string;
 }
 
-/** Folders that belong to the same git repository. */
-export interface RepoGroup {
-  /** Absolute path of the repository root, or undefined for non-git folders. */
-  readonly repoRoot: string | undefined;
-  readonly name: string;
-  readonly folders: FolderRef[];
-}
-
 const CLAUDE_WORKTREES_DIR = '.claude/worktrees';
-
-/**
- * Groups workspace folders by the git repository they belong to, so several
- * worktrees of one repo share a section. For every repo with an open folder,
- * also discovers sibling worktrees under `<repoRoot>/.claude/worktrees/*` —
- * the convention this user's tooling uses to create worktrees — so they show
- * up without being manually added to the VS Code workspace. Non-git folders
- * are collected into a single trailing "Folders" group.
- */
-export async function groupFoldersByRepo(
-  folders: readonly vscode.WorkspaceFolder[],
-): Promise<RepoGroup[]> {
-  const repos = new Map<string, { name: string; folders: FolderRef[] }>();
-  const nonGit: FolderRef[] = [];
-
-  for (const folder of folders) {
-    const ref: FolderRef = { uri: folder.uri, name: folder.name };
-    const repoRoot = await repoRootOf(folder.uri);
-    if (repoRoot === undefined) {
-      nonGit.push(ref);
-      continue;
-    }
-    addFolder(repos, repoRoot, ref);
-  }
-
-  for (const [repoRoot, group] of repos) {
-    // The main checkout itself, then its sibling worktrees. The checkout is
-    // already in the group in a root window (it is the open folder); in a sub
-    // worktree window it is not, and the section would otherwise omit it.
-    const rootRef: FolderRef = { uri: vscode.Uri.file(repoRoot), name: path.basename(repoRoot) };
-    for (const discovered of [rootRef, ...(await discoverClaudeWorktrees(repoRoot))]) {
-      if (!group.folders.some((existing) => existing.uri.fsPath === discovered.uri.fsPath)) {
-        group.folders.push(discovered);
-      }
-    }
-  }
-
-  const groups: RepoGroup[] = [...repos.entries()].map(([repoRoot, group]) => ({
-    repoRoot,
-    ...group,
-  }));
-  if (nonGit.length > 0) {
-    groups.push({ repoRoot: undefined, name: 'Folders', folders: nonGit });
-  }
-  return groups;
-}
-
-function addFolder(
-  repos: Map<string, { name: string; folders: FolderRef[] }>,
-  repoRoot: string,
-  ref: FolderRef,
-): void {
-  const existing = repos.get(repoRoot);
-  if (existing) {
-    existing.folders.push(ref);
-  } else {
-    repos.set(repoRoot, { name: path.basename(repoRoot), folders: [ref] });
-  }
-}
 
 /**
  * Creates a new worktree for the repo under `.claude/worktrees/<name>` — the

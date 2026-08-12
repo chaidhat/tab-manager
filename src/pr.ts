@@ -19,8 +19,8 @@ interface StatusCheck {
   state?: string;
 }
 
-/** A worktree's pull request, as reported by `gh pr view`. */
-export interface PrInfo {
+/** A pull request as the worktree tree needs it — everything but the body. */
+export interface PrSummary {
   number: number;
   title: string;
   state: string;
@@ -28,12 +28,25 @@ export interface PrInfo {
   isDraft: boolean;
   /** The branch the PR merges into — what changed files are diffed against. */
   baseRefName: string;
+  /** The PR's own branch. A worktree with it checked out is that PR's worktree. */
+  headRefName: string;
   /** GitHub's merge check: MERGEABLE, CONFLICTING, or UNKNOWN (still computing). */
   mergeable: string;
   /** Every CI check on the PR's head commit. */
   statusCheckRollup: StatusCheck[] | null;
+}
+
+/** A single pull request, description included, as the Pull Request view shows it. */
+export interface PrInfo extends PrSummary {
   body: string;
 }
+
+// The `gh --json` field lists. Listing a repo's PRs deliberately leaves out the
+// body: it is only rendered for one PR at a time, and asking for a hundred of
+// them makes the call much heavier for nothing.
+const SUMMARY_FIELDS =
+  'number,title,state,url,isDraft,baseRefName,headRefName,mergeable,statusCheckRollup';
+const VIEW_FIELDS = `${SUMMARY_FIELDS},body`;
 
 type PrLookup = { kind: 'pr'; pr: PrInfo } | { kind: 'none' } | { kind: 'no-gh' };
 
@@ -42,15 +55,7 @@ type PrLookup = { kind: 'pr'; pr: PrInfo } | { kind: 'none' } | { kind: 'no-gh' 
  * Throws when there is no PR or `gh` fails.
  */
 async function fetchPr(cwd: string): Promise<PrInfo> {
-  const stdout = await gh(
-    [
-      'pr',
-      'view',
-      '--json',
-      'number,title,state,url,isDraft,baseRefName,mergeable,statusCheckRollup,body',
-    ],
-    cwd,
-  );
+  const stdout = await gh(['pr', 'view', '--json', VIEW_FIELDS], cwd);
   return JSON.parse(stdout) as PrInfo;
 }
 
@@ -119,6 +124,12 @@ interface PrViewState {
   branch?: string;
 }
 
+/**
+ * What the page shows: the "Loading…" placeholder while the `gh` lookup runs,
+ * or the resolved state (undefined when no worktree is selected).
+ */
+type PrRender = { kind: 'loading' } | { kind: 'ready'; state: PrViewState | undefined };
+
 /** The `data-vscode-context` payload the "…" button's menu commands receive. */
 interface PrMenuContext {
   cwd: string;
@@ -134,10 +145,7 @@ type PendingEdits = Map<string, { cwd: string; number: number }>;
  * Returns a re-render callback so the container-wide refresh command — which
  * also refreshes the Files Changed tree — can be composed in `extension.ts`.
  */
-export function registerPrView(
-  context: vscode.ExtensionContext,
-  store: LayoutStore,
-): () => void {
+export function registerPrView(context: vscode.ExtensionContext, store: LayoutStore): () => void {
   const provider = new PrWebviewProvider(store, context.extensionUri);
   const pendingEdits: PendingEdits = new Map();
 
@@ -171,6 +179,8 @@ class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable
   private readonly subscription: vscode.Disposable;
   private stateSignature: string;
   private lastState: PrViewState | undefined;
+  /** Bumped per render, so a slow lookup can't paint over a newer one. */
+  private renderToken = 0;
 
   constructor(
     private readonly store: LayoutStore,
@@ -202,12 +212,27 @@ class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable
     void this.render();
   }
 
+  /**
+   * Paints the loading page, then the PR itself once the `gh` lookup lands —
+   * the lookup spawns a subprocess, so the view would otherwise sit on stale
+   * (or, on first open, blank) content until it returned.
+   */
   private async render(): Promise<void> {
     if (this.views.size === 0) {
       return;
     }
+    const token = ++this.renderToken;
+    this.paint({ kind: 'loading' });
     const state = await this.computeState();
+    // A refresh that started later has already painted — its state is newer.
+    if (token !== this.renderToken) {
+      return;
+    }
     this.lastState = state;
+    this.paint({ kind: 'ready', state });
+  }
+
+  private paint(render: PrRender): void {
     for (const view of this.views) {
       // VS Code's own icon font, mapped to a webview-servable URI per view.
       const codiconsUri = view.webview.asWebviewUri(
@@ -219,7 +244,7 @@ class PrWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable
           'codicon.css',
         ),
       );
-      view.webview.html = renderHtml(state, codiconsUri.toString());
+      view.webview.html = renderHtml(render, codiconsUri.toString());
     }
   }
 
@@ -296,9 +321,12 @@ function renderDigitStrip(prNumber: number): string {
   return `<div class="digits" aria-label="PR #${prNumber}">${swatches}</div>`;
 }
 
-function renderHtml(state: PrViewState | undefined, codiconsHref: string): string {
+function renderHtml(render: PrRender, codiconsHref: string): string {
+  const state = render.kind === 'ready' ? render.state : undefined;
   let content: string;
-  if (!state) {
+  if (render.kind === 'loading') {
+    content = `<p class="muted">Loading…</p>`;
+  } else if (!state) {
     content = `<p class="muted">Click a worktree in the Root Worktree Manager view to see its pull request.</p>`;
   } else if (state.lookup.kind === 'no-gh') {
     content = `<p class="muted">GitHub CLI (gh) not found — <code>brew install gh</code>.</p>`;
@@ -592,20 +620,18 @@ export async function resolveWorktreePr(cwd: string): Promise<PrInfo | undefined
   }
 }
 
-/** The repo's open PRs, for pickers. Empty on any failure (logged). */
-export interface OpenPr {
-  number: number;
-  title: string;
-  headRefName: string;
-}
-
-export async function listOpenPrs(cwd: string): Promise<OpenPr[]> {
+/**
+ * Every open pull request in the repo, in one `gh` call — what the worktree
+ * tree lists, and what the "New Worktree from PR" picker offers. Empty on any
+ * failure (logged, not surfaced: this runs speculatively per repository).
+ */
+export async function listOpenPrs(cwd: string): Promise<PrSummary[]> {
   try {
     const stdout = await gh(
-      ['pr', 'list', '--json', 'number,title,headRefName', '--limit', '100'],
+      ['pr', 'list', '--state', 'open', '--limit', '100', '--json', SUMMARY_FIELDS],
       cwd,
     );
-    return JSON.parse(stdout) as OpenPr[];
+    return JSON.parse(stdout) as PrSummary[];
   } catch (error) {
     log(`pr: listing PRs failed: ${errorMessage(error)}`);
     return [];
