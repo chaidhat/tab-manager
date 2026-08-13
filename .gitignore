@@ -1,5 +1,5 @@
 node_modules/
 dist/
-*.vsix
+build/
 .vscode-test/
 .claude/worktrees/*

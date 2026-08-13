@@ -2,7 +2,7 @@
   "name": "tab-manager",
   "displayName": "Tab Manager",
   "description": "Worktree-centric window management: one window per worktree, with PR linking, creation from PRs, and changed-file diffs.",
-  "version": "0.2.55",
+  "version": "0.2.57",
   "publisher": "chaidhat",
   "license": "MIT",
   "repository": {
@@ -45,6 +45,11 @@
           "id": "tab-manager-sub-worktree",
           "title": "Sub Worktree Manager",
           "icon": "media/layers.svg"
+        },
+        {
+          "id": "tab-manager-sessions",
+          "title": "Claude Sessions",
+          "icon": "media/claude.svg"
         }
       ]
     },
@@ -69,6 +74,13 @@
           "name": "Files Changed",
           "when": "tabManager.isSubWorktree"
         }
+      ],
+      "tab-manager-sessions": [
+        {
+          "type": "tree",
+          "id": "tab-manager.claudeSessions",
+          "name": "Claude Sessions"
+        }
       ]
     },
     "viewsWelcome": [
@@ -79,6 +91,10 @@
       {
         "view": "tab-manager.subWorktreeFiles",
         "contents": "No files changed compared to the base branch."
+      },
+      {
+        "view": "tab-manager.claudeSessions",
+        "contents": "No Claude Code sessions are running in your repositories.\nSessions appear here on their own, with what each one is doing — and you get a notification when one finishes or asks you something."
       }
     ],
     "commands": [
@@ -458,7 +474,7 @@
     "check": "npm run compile && npm run lint && npm run format:check",
     "vscode:prepublish": "npm run compile",
     "start": "npm run compile && code --extensionDevelopmentPath=\"$PWD\" --new-window .",
-    "package": "vsce package"
+    "package": "vsce package --out build/tab-manager.vsix"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

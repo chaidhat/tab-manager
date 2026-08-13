@@ -268,9 +268,6 @@ export class RootWorktreeManager
     item.iconPath = pr
       ? prDigitStripIcon(pr.number)
       : new vscode.ThemeIcon(element.isRoot ? 'repo' : 'folder');
-    if (pr && !element.folderUri) {
-      item.description = 'no worktree';
-    }
 
     const isOpen = element.folderUri !== undefined && this.openFolderUris().has(element.folderUri);
     if (element.isRoot) {

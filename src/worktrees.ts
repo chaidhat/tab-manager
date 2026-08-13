@@ -11,6 +11,35 @@ export interface FolderRef {
 
 const CLAUDE_WORKTREES_DIR = '.claude/worktrees';
 
+/** A worktree git has a branch checked out in, and the state of its folder. */
+export interface BranchWorktree {
+  /** Absolute path of the worktree's folder, as git records it. */
+  readonly path: string;
+  /**
+   * Git still lists the worktree but its folder is gone — someone deleted it
+   * without telling git. It holds the branch just the same.
+   */
+  readonly stale: boolean;
+}
+
+/**
+ * A checkout that failed because another worktree already has the branch —
+ * git's "'<branch>' is already used by worktree at …". Separate from a plain
+ * failure because this one has a way out: let go of the worktree named in
+ * {@link holder} and the checkout works.
+ */
+export class BranchInUseError extends Error {
+  constructor(
+    readonly branch: string,
+    readonly holder: BranchWorktree,
+    gitMessage: string,
+    cause: unknown,
+  ) {
+    super(gitMessage, { cause });
+    this.name = 'BranchInUseError';
+  }
+}
+
 /** Where a pull request's worktree lives, whether or not it has been created. */
 export function worktreePathForPr(repoRoot: string, prNumber: number): string {
   return path.join(repoRoot, CLAUDE_WORKTREES_DIR, String(prNumber));
@@ -37,6 +66,10 @@ export async function addWorktree(repoRoot: string, name: string): Promise<strin
  * PR number under `.claude/worktrees/`. The worktree starts detached and
  * `gh pr checkout` runs inside it — gh handles fetching, branch creation and
  * fork remotes. A failed checkout removes the half-made worktree again.
+ *
+ * Throws {@link BranchInUseError} when the checkout failed because another
+ * worktree already holds the PR's branch, so the caller can offer to delete
+ * that worktree; every other failure throws with git's or gh's own message.
  */
 export async function addWorktreeForPr(repoRoot: string, prNumber: number): Promise<string> {
   const worktreePath = worktreePathForPr(repoRoot, prNumber);
@@ -48,10 +81,80 @@ export async function addWorktreeForPr(repoRoot: string, prNumber: number): Prom
   try {
     await gh(['pr', 'checkout', String(prNumber)], worktreePath);
   } catch (error) {
+    // Removed before the branch is looked up, so the half-made worktree isn't
+    // itself in the list the lookup reads.
     await git(['worktree', 'remove', '--force', worktreePath], repoRoot).catch(() => undefined);
-    throw new Error(errorMessage(error), { cause: error });
+    throw (
+      (await branchInUseError(repoRoot, prNumber, error)) ??
+      new Error(errorMessage(error), { cause: error })
+    );
   }
   return worktreePath;
+}
+
+/**
+ * Turns a failed PR checkout into a {@link BranchInUseError} when the reason is
+ * that the PR's branch is checked out somewhere else — the one failure the user
+ * can be offered a way out of. Returns undefined when the branch is free (the
+ * checkout failed for some other reason) or when gh can't say which branch the
+ * PR is on, and the caller reports the original failure instead.
+ */
+async function branchInUseError(
+  repoRoot: string,
+  prNumber: number,
+  cause: unknown,
+): Promise<BranchInUseError | undefined> {
+  const branch = await prHeadBranch(repoRoot, prNumber);
+  if (branch === undefined) {
+    return undefined;
+  }
+  const holder = await worktreeUsingBranch(repoRoot, branch).catch(() => undefined);
+  return holder && new BranchInUseError(branch, holder, errorMessage(cause), cause);
+}
+
+/** The branch a pull request merges from, or undefined when `gh` can't say. */
+async function prHeadBranch(repoRoot: string, prNumber: number): Promise<string | undefined> {
+  try {
+    const stdout = await gh(['pr', 'view', String(prNumber), '--json', 'headRefName'], repoRoot);
+    return (JSON.parse(stdout) as { headRefName?: string }).headRefName || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The worktree git considers to have `branch` checked out, if any — the one
+ * whose existence makes a second checkout of it fail. That includes the
+ * repository's own checkout, and worktrees whose folder has been deleted
+ * without git being told: git keeps listing those, and they keep the branch.
+ */
+export async function worktreeUsingBranch(
+  repoRoot: string,
+  branch: string,
+): Promise<BranchWorktree | undefined> {
+  const entries = await worktreeEntries(repoRoot);
+  const holder = entries.find((entry) => entry.lines.includes(`branch refs/heads/${branch}`));
+  return (
+    holder && {
+      path: holder.path,
+      stale: holder.lines.some((line) => line === 'prunable' || line.startsWith('prunable ')),
+    }
+  );
+}
+
+/**
+ * Unregisters a worktree git lists but whose folder is gone. `git worktree
+ * remove` is right here where {@link removeWorktree}'s trash-then-unregister
+ * isn't: there are no files left to move. It still refuses if the folder turns
+ * out to be there after all, and it drops this one entry, where `git worktree
+ * prune` would unregister every other missing worktree along with it.
+ */
+export async function forgetWorktree(repoRoot: string, folderPath: string): Promise<void> {
+  try {
+    await git(['worktree', 'remove', folderPath], repoRoot);
+  } catch (error) {
+    throw new Error(errorMessage(error), { cause: error });
+  }
 }
 
 /**
@@ -132,16 +235,35 @@ async function checkRemovable(folderPath: string, repoRoot: string): Promise<voi
  * that matters and a missing entry means there is nothing to unlock.
  */
 async function lockReasonOf(folderPath: string, repoRoot: string): Promise<string | undefined> {
+  const entry = (await worktreeEntries(repoRoot)).find((each) => each.path === folderPath);
+  const locked = entry?.lines.find((line) => line === 'locked' || line.startsWith('locked '));
+  return locked === undefined ? undefined : locked.slice('locked'.length).trim();
+}
+
+/** One worktree as `git worktree list --porcelain` describes it. */
+interface WorktreeEntry {
+  /** The absolute path on its `worktree` line. */
+  readonly path: string;
+  /** Every line of the entry, including the `worktree` one. */
+  readonly lines: readonly string[];
+}
+
+/**
+ * Every worktree of the repo, main checkout included, straight from git's
+ * porcelain listing: one blank-line-separated block each, whose first line is
+ * `worktree <path>` and whose remaining lines are the attributes git recorded
+ * (`branch`, `detached`, `locked`, `prunable`).
+ */
+async function worktreeEntries(repoRoot: string): Promise<WorktreeEntry[]> {
   const stdout = await git(['worktree', 'list', '--porcelain'], repoRoot);
-  for (const entry of stdout.split('\n\n')) {
-    const lines = entry.split('\n');
-    if (lines[0] !== `worktree ${folderPath}`) {
-      continue;
+  const entries: WorktreeEntry[] = [];
+  for (const block of stdout.split('\n\n')) {
+    const lines = block.split('\n').filter((line) => line !== '');
+    if (lines[0]?.startsWith('worktree ')) {
+      entries.push({ path: lines[0].slice('worktree '.length), lines });
     }
-    const locked = lines.find((line) => line === 'locked' || line.startsWith('locked '));
-    return locked === undefined ? undefined : locked.slice('locked'.length).trim();
   }
-  return undefined;
+  return entries;
 }
 
 /**

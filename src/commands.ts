@@ -8,8 +8,10 @@ import type { BranchElement, RepoSection } from './rootWorktreeManager';
 import {
   addWorktree,
   addWorktreeForPr,
+  BranchInUseError,
   currentBranch,
   discoverClaudeWorktrees,
+  forgetWorktree,
   removeWorktree,
   repoRootOf,
 } from './worktrees';
@@ -207,17 +209,8 @@ async function createWorktreeForPr(
   prNumber: number,
   refreshWorktrees: () => void,
 ): Promise<void> {
-  let worktreePath: string;
-  try {
-    worktreePath = await vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: `Creating worktree for #${prNumber}…`,
-      },
-      () => addWorktreeForPr(repoRoot, prNumber),
-    );
-  } catch (error) {
-    vscode.window.showErrorMessage(errorMessage(error));
+  const worktreePath = await createPrWorktree(repoRoot, prNumber);
+  if (worktreePath === undefined) {
     return;
   }
 
@@ -228,6 +221,108 @@ async function createWorktreeForPr(
     COMMANDS.openWindow,
     vscode.Uri.file(worktreePath).toString(),
   );
+}
+
+/**
+ * The creation itself, with the one recoverable failure handled: a branch can
+ * only be checked out in one worktree at a time, so when another worktree
+ * already holds the PR's branch this asks whether to let go of that worktree
+ * and, if so, tries once more. Returns the new worktree's path, or undefined
+ * when it wasn't created — the failure is shown to the user either way.
+ */
+async function createPrWorktree(repoRoot: string, prNumber: number): Promise<string | undefined> {
+  try {
+    return await creatingWorktree(repoRoot, prNumber);
+  } catch (error) {
+    if (!(error instanceof BranchInUseError)) {
+      vscode.window.showErrorMessage(errorMessage(error));
+      return undefined;
+    }
+    if (!(await releaseBranch(repoRoot, error))) {
+      return undefined;
+    }
+  }
+
+  // Only reached once the branch is free — a single retry, so a checkout that
+  // keeps failing reports itself instead of asking again.
+  try {
+    return await creatingWorktree(repoRoot, prNumber);
+  } catch (error) {
+    vscode.window.showErrorMessage(errorMessage(error));
+    return undefined;
+  }
+}
+
+function creatingWorktree(repoRoot: string, prNumber: number): Thenable<string> {
+  return vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: `Creating worktree for #${prNumber}…`,
+    },
+    () => addWorktreeForPr(repoRoot, prNumber),
+  );
+}
+
+/**
+ * Asks whether to give up the worktree standing in the way of a branch, and
+ * does it. Returns whether the branch is now free.
+ *
+ * Three worktrees can hold a branch and each needs its own answer: the
+ * repository's own checkout, which is not ours to delete; one git still lists
+ * after its folder was deleted, where there is nothing left to trash and only
+ * the bookkeeping to drop; and a real worktree, which goes to the Trash the
+ * same way "Delete Worktree" sends one.
+ */
+async function releaseBranch(repoRoot: string, conflict: BranchInUseError): Promise<boolean> {
+  const holderPath = conflict.holder.path;
+  const name = path.basename(holderPath);
+
+  if (holderPath === repoRoot) {
+    vscode.window.showErrorMessage(
+      `Branch "${conflict.branch}" is checked out in the repository itself (${holderPath}) — switch it to another branch first.`,
+    );
+    return false;
+  }
+  if (isWorkspaceFolder(vscode.Uri.file(holderPath).toString())) {
+    vscode.window.showWarningMessage(
+      `Branch "${conflict.branch}" is checked out in "${name}", which is open in this workspace — remove it from the workspace first.`,
+    );
+    return false;
+  }
+
+  if (conflict.holder.stale) {
+    const choice = await vscode.window.showWarningMessage(
+      `Git still lists a worktree holding branch "${conflict.branch}", but its folder is gone.`,
+      {
+        modal: true,
+        detail: `${holderPath}\n\nUnregister it so the branch can be checked out here?`,
+      },
+      'Unregister',
+    );
+    if (choice !== 'Unregister') {
+      return false;
+    }
+    try {
+      await forgetWorktree(repoRoot, holderPath);
+      return true;
+    } catch (error) {
+      vscode.window.showErrorMessage(errorMessage(error));
+      return false;
+    }
+  }
+
+  const choice = await vscode.window.showWarningMessage(
+    `Branch "${conflict.branch}" is already checked out in the worktree "${name}".`,
+    {
+      modal: true,
+      detail: `${holderPath}\n\nDelete that worktree — moving it to the Trash — and create this one instead?`,
+    },
+    'Delete Worktree',
+  );
+  if (choice !== 'Delete Worktree') {
+    return false;
+  }
+  return trashWorktree(name, holderPath);
 }
 
 /**
@@ -247,10 +342,7 @@ async function deleteWorktree(
   if (!worktree.folderUri) {
     return; // a pull request with no worktree — nothing to delete
   }
-  const isOpen = (vscode.workspace.workspaceFolders ?? []).some(
-    (folder) => folder.uri.toString() === worktree.folderUri,
-  );
-  if (isOpen) {
+  if (isWorkspaceFolder(worktree.folderUri)) {
     vscode.window.showWarningMessage(
       'This worktree is open in the workspace — remove it from the workspace first.',
     );
@@ -266,27 +358,47 @@ async function deleteWorktree(
   }
 
   const folderPath = vscode.Uri.parse(worktree.folderUri).fsPath;
-  try {
-    await moveToTrash(worktree.name, folderPath, false);
-  } catch (error) {
-    const force = await vscode.window.showWarningMessage(
-      `Git refused to delete "${worktree.name}".`,
-      { modal: true, detail: `${errorMessage(error)}\n\nForce delete and discard its changes?` },
-      'Force Delete',
-    );
-    if (force !== 'Force Delete') {
-      return;
-    }
-    try {
-      await moveToTrash(worktree.name, folderPath, true);
-    } catch (forceError) {
-      vscode.window.showErrorMessage(errorMessage(forceError));
-      return;
-    }
+  if (!(await trashWorktree(worktree.name, folderPath))) {
+    return;
   }
 
   refreshWorktrees();
   vscode.window.showInformationMessage(`Moved worktree "${worktree.name}" to the Trash.`);
+}
+
+/**
+ * Moves a worktree to the Trash, and when git refuses because it has changes,
+ * asks the second, explicit question — quoting git's refusal — before forcing
+ * it. Returns whether the worktree is gone; a failure is shown to the user.
+ */
+async function trashWorktree(name: string, folderPath: string): Promise<boolean> {
+  try {
+    await moveToTrash(name, folderPath, false);
+    return true;
+  } catch (error) {
+    const force = await vscode.window.showWarningMessage(
+      `Git refused to delete "${name}".`,
+      { modal: true, detail: `${errorMessage(error)}\n\nForce delete and discard its changes?` },
+      'Force Delete',
+    );
+    if (force !== 'Force Delete') {
+      return false;
+    }
+    try {
+      await moveToTrash(name, folderPath, true);
+      return true;
+    } catch (forceError) {
+      vscode.window.showErrorMessage(errorMessage(forceError));
+      return false;
+    }
+  }
+}
+
+/** Whether a folder is one this window has open — deleting those breaks the workspace. */
+function isWorkspaceFolder(folderUri: string): boolean {
+  return (vscode.workspace.workspaceFolders ?? []).some(
+    (folder) => folder.uri.toString() === folderUri,
+  );
 }
 
 /**

@@ -4,6 +4,7 @@ import { registerFileCommands } from './fileCommands';
 import { registerPrView } from './pr';
 import { rememberOpenRepos } from './repos';
 import { RootWorktreeManager, WorktreeRowDecorationProvider } from './rootWorktreeManager';
+import { SessionMonitor } from './sessionMonitor';
 import { LayoutStore } from './store';
 import { ChangedFileDecorationProvider, SubWorktreeManager } from './subWorktreeManager';
 import { isSubWorktreeWindow } from './worktrees';
@@ -12,6 +13,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const store = new LayoutStore(context.workspaceState);
   const rootManager = new RootWorktreeManager(store);
   const subManager = new SubWorktreeManager(store);
+  const sessionMonitor = new SessionMonitor();
 
   // A window opened at a `.claude/worktrees/<name>` folder additionally gets
   // the dedicated Sub Worktree Manager container, whose views target that
@@ -38,6 +40,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(filesView);
   }
 
+  // Like the Files view, createTreeView rather than registerTreeDataProvider:
+  // the monitor needs the view handle to put the waiting-session count on the
+  // activity-bar icon.
+  const sessionsView = vscode.window.createTreeView('tab-manager.claudeSessions', {
+    treeDataProvider: sessionMonitor,
+  });
+  sessionMonitor.attachView(sessionsView);
+  context.subscriptions.push(sessionsView);
+
   // The Root Worktree Manager's repository list is global (VS Code settings),
   // so every window lists the same repositories — and a window opening on a
   // worktree is what puts that worktree's repository on the list.
@@ -47,6 +58,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     store,
     rootManager,
     subManager,
+    sessionMonitor,
     vscode.workspace.onDidChangeWorkspaceFolders(() => void rememberOpenRepos()),
     vscode.window.registerFileDecorationProvider(new ChangedFileDecorationProvider()),
     vscode.window.registerFileDecorationProvider(new WorktreeRowDecorationProvider()),
