@@ -1,0 +1,1 @@
+When you are asked for a feature, if not explicitly told not to, please package it and install it locally via `code --install-extension`

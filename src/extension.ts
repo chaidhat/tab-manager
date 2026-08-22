@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { registerCommands } from './commands';
 import { registerFileCommands } from './fileCommands';
 import { registerPrView } from './pr';
+import { ReadMarkStore } from './readMarks';
 import { rememberOpenRepos } from './repos';
 import { RootWorktreeManager, WorktreeRowDecorationProvider } from './rootWorktreeManager';
 import { SessionMonitor } from './sessionMonitor';
@@ -11,8 +12,13 @@ import { isSubWorktreeWindow } from './worktrees';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const store = new LayoutStore(context.workspaceState);
+  // Which changed files have been read is per repository and pull request, not
+  // per window, so it lives in global storage — loaded before the views render
+  // so the first paint already shows the ticks.
+  const marks = new ReadMarkStore(context.globalStorageUri);
+  await marks.load();
   const rootManager = new RootWorktreeManager(store);
-  const subManager = new SubWorktreeManager(store);
+  const subManager = new SubWorktreeManager(store, marks);
   const sessionMonitor = new SessionMonitor();
 
   // A window opened at a `.claude/worktrees/<name>` folder additionally gets
@@ -33,8 +39,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (isSubWorktree) {
     // createTreeView (not registerTreeDataProvider) so the provider can retitle
     // the view with the changed-file count.
+    // manageCheckboxStateManually: the "read" ticks are ours to persist (per
+    // repository and pull request), so VS Code must not remember them itself.
     const filesView = vscode.window.createTreeView('tab-manager.subWorktreeFiles', {
       treeDataProvider: subManager,
+      manageCheckboxStateManually: true,
     });
     subManager.attachView(filesView);
     context.subscriptions.push(filesView);
@@ -56,6 +65,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     store,
+    marks,
     rootManager,
     subManager,
     sessionMonitor,

@@ -13,8 +13,9 @@ import {
 } from './gitExtension';
 import { log } from './log';
 import { resolveWorktreePr } from './pr';
+import { absolutePath, fileDigest, ReadMarkStore, ReadScope, storedPath } from './readMarks';
 import { LayoutStore } from './store';
-import { currentBranch } from './worktrees';
+import { currentBranch, repoRootOf } from './worktrees';
 
 export type FilesElement = FileEntry;
 
@@ -24,6 +25,12 @@ const FILES_VIEW_TITLE = 'Files Changed';
 // Marker query put on row resourceUris so ChangedFileDecorationProvider can
 // badge them (U/M/D) — a query no other view's URIs carry.
 const STATUS_QUERY_KEY = 'tabManagerStatus';
+
+// Struck-through text for rows the user has marked read. A tree row's label is
+// plain text — there is no strikethrough on TreeItem, and FileDecoration has
+// no such property either — so the only way to draw one is a combining long
+// stroke after every character.
+const STRIKE = '\u0336';
 
 const STATUS_DECORATION: Record<FileChangeKind, vscode.FileDecoration> = {
   added: new vscode.FileDecoration(
@@ -47,6 +54,11 @@ const STATUS_DECORATION: Record<FileChangeKind, vscode.FileDecoration> = {
     new vscode.ThemeColor('gitDecoration.renamedResourceForeground'),
   ),
 };
+
+/** `name` with a line drawn through it, for a file marked read. */
+function struckThrough(name: string): string {
+  return [...name].map((character) => character + STRIKE).join('');
+}
 
 /**
  * Badges Files-view rows with their status vs the compare base (U added,
@@ -138,6 +150,7 @@ export class SubWorktreeManager
   private changedChildren: Map<string, FileEntry[]> | undefined;
   /** The view handle, for the "Files Changed (N)" title. */
   private view: vscode.TreeView<FilesElement> | undefined;
+  private checkboxSubscription: vscode.Disposable | undefined;
   private compareBase: string | undefined;
   /** Display name of the ref being compared against, for diff-tab titles. */
   private compareLabel: string | undefined;
@@ -146,8 +159,15 @@ export class SubWorktreeManager
   // different root (or branch) recomputes. `fromPr` records whether the ref
   // is the PR's target branch or the default-branch fallback — only the
   // fallback is retried (see subscribeToRepository).
-  private cachedCompareRef: { key: string; ref: string | undefined; fromPr: boolean } | undefined;
+  private cachedCompareRef:
+    | { key: string; ref: string | undefined; fromPr: boolean; scope: ReadScope | undefined }
+    | undefined;
   private detectedDefault: { root: string; branch: string | undefined } | undefined;
+  /** The review the read marks on these rows belong to; see {@link ReadScope}. */
+  private scope: ReadScope | undefined;
+  /** Paths whose content changed and whose read mark still has to be checked. */
+  private readonly pendingDigestChecks = new Set<string>();
+  private digestTimer: ReturnType<typeof setTimeout> | undefined;
 
   // Whether directory rows default to expanded (the view-title toggle). The
   // generation is baked into row ids so each toggle defeats VS Code's
@@ -155,8 +175,15 @@ export class SubWorktreeManager
   private expandAll = false;
   private expandGeneration = 0;
 
-  constructor(private readonly store: LayoutStore) {
-    this.subscription = store.onDidChange(() => this.onStoreChange());
+  constructor(
+    private readonly store: LayoutStore,
+    private readonly marks: ReadMarkStore,
+  ) {
+    this.subscription = vscode.Disposable.from(
+      store.onDidChange(() => this.onStoreChange()),
+      // Ticking a file (here or in another window) only changes how rows look.
+      marks.onDidChange(() => this.emitter.fire()),
+    );
     this.applyStoreState();
     void vscode.commands.executeCommand('setContext', 'tabManager.filesExpanded', false);
   }
@@ -173,9 +200,18 @@ export class SubWorktreeManager
     this.emitter.fire();
   }
 
-  /** Hooks up the TreeView so the title can carry the changed-file count. */
+  /**
+   * Hooks up the TreeView: the title carries the changed-file count, and the
+   * row checkboxes drive the read marks. The view is created with
+   * `manageCheckboxStateManually`, so a tick is only real once it is stored.
+   */
   attachView(view: vscode.TreeView<FilesElement>): void {
     this.view = view;
+    this.checkboxSubscription = view.onDidChangeCheckboxState((event) => {
+      for (const [node, state] of event.items) {
+        void this.setRead(node, state === vscode.TreeItemCheckboxState.Checked);
+      }
+    });
     this.updateTitle();
   }
 
@@ -222,8 +258,10 @@ export class SubWorktreeManager
 
     const pattern = new vscode.RelativePattern(root, '**/*');
     // Only create/delete affect the tree's shape; content changes are left to
-    // the Git decoration provider, which refreshes itself independently.
-    const fsWatcher = vscode.workspace.createFileSystemWatcher(pattern, false, true, false);
+    // the Git decoration provider, which refreshes itself independently — but
+    // they do invalidate read marks, which is a far cheaper check than a
+    // refresh (it only hashes the marked file that was edited).
+    const fsWatcher = vscode.workspace.createFileSystemWatcher(pattern);
     const scheduleRefresh = () => {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = setTimeout(() => this.emitter.fire(), 300);
@@ -232,6 +270,7 @@ export class SubWorktreeManager
       fsWatcher,
       fsWatcher.onDidCreate(scheduleRefresh),
       fsWatcher.onDidDelete(scheduleRefresh),
+      fsWatcher.onDidChange((uri) => this.scheduleDigestCheck(uri)),
     );
   }
 
@@ -306,6 +345,56 @@ export class SubWorktreeManager
       : { uri: deepest.uri, name: names.join('/'), isDirectory: true };
   }
 
+  /**
+   * Queues a re-check of one edited file's read mark. Debounced, and skipped
+   * outright for files that aren't marked — a save in a file nobody ticked
+   * costs nothing.
+   */
+  private scheduleDigestCheck(uri: vscode.Uri): void {
+    const root = this.rootUri();
+    const relative = root && storedPath(root, uri);
+    if (
+      !this.scope ||
+      relative === undefined ||
+      this.marks.digestOf(this.scope, relative) === undefined
+    ) {
+      return;
+    }
+    this.pendingDigestChecks.add(relative);
+    clearTimeout(this.digestTimer);
+    this.digestTimer = setTimeout(() => void this.dropStaleMarks(this.pendingDigestChecks), 300);
+  }
+
+  /**
+   * Un-marks files whose content no longer matches what was read. `candidates`
+   * is drained as it is taken, so a check in flight can't swallow paths queued
+   * behind it.
+   */
+  private async dropStaleMarks(candidates: Set<string>): Promise<void> {
+    const scope = this.scope;
+    const root = this.rootUri();
+    const paths = [...candidates];
+    candidates.clear();
+    if (!scope || !root || paths.length === 0) {
+      return;
+    }
+    const stale = await Promise.all(
+      paths.map(async (relative) => {
+        const marked = this.marks.digestOf(scope, relative);
+        if (marked === undefined) {
+          return undefined; // un-marked while we were queued
+        }
+        const digest = await fileDigest(absolutePath(root, relative));
+        return digest === marked ? undefined : relative;
+      }),
+    );
+    const dropped = stale.filter((relative): relative is string => relative !== undefined);
+    if (dropped.length > 0) {
+      log(`read marks: ${dropped.length} file(s) changed since they were read — un-marking`);
+      await this.marks.unmark(scope, dropped);
+    }
+  }
+
   /** Refreshes the changed-file set (and the folders containing them). */
   private async recomputeChangedSet(root: vscode.Uri): Promise<void> {
     this.changedFiles = undefined;
@@ -331,6 +420,11 @@ export class SubWorktreeManager
     this.compareLabel = branch;
     this.changedStats = await changedLineCounts(root, comparison.base, comparison.files);
     this.changedDirStats = totalsByDirectory(root, this.changedStats);
+    // Catch up on edits made while this window wasn't watching (another window,
+    // an agent, a rebase) before the rows render their ticks.
+    if (this.scope) {
+      await this.dropStaleMarks(new Set(this.marks.markedPaths(this.scope)));
+    }
   }
 
   /**
@@ -346,10 +440,17 @@ export class SubWorktreeManager
     const key = `${root.toString()}|${branch ?? ''}`;
     if (this.cachedCompareRef?.key !== key) {
       const pr = await resolveWorktreePr(root.fsPath);
+      // Read marks hang off the same lookup: the repository the worktree
+      // belongs to, plus the PR being reviewed (the branch, when there is no
+      // PR — a worktree with neither has nowhere to file them).
+      const repoRoot = await repoRootOf(root);
+      const id = pr ? `pr:${pr.number}` : branch ? `branch:${branch}` : undefined;
+      const scope = repoRoot !== undefined && id !== undefined ? { repoRoot, id } : undefined;
       this.cachedCompareRef = pr
-        ? { key, ref: `origin/${pr.baseRefName}`, fromPr: true }
-        : { key, ref: await this.defaultBranch(root), fromPr: false };
+        ? { key, ref: `origin/${pr.baseRefName}`, fromPr: true, scope }
+        : { key, ref: await this.defaultBranch(root), fromPr: false, scope };
     }
+    this.scope = this.cachedCompareRef.scope;
     return this.cachedCompareRef.ref;
   }
 
@@ -383,6 +484,46 @@ export class SubWorktreeManager
     return this.detectedDefault.branch;
   }
 
+  /**
+   * Whether a file is marked read, or undefined when it can't be marked at all
+   * (no review to file the mark under, or the path isn't inside the worktree).
+   */
+  private isRead(uri: vscode.Uri): boolean | undefined {
+    const root = this.rootUri();
+    const relative = root && storedPath(root, uri);
+    if (!this.scope || relative === undefined) {
+      return undefined;
+    }
+    return this.marks.digestOf(this.scope, relative) !== undefined;
+  }
+
+  /**
+   * Handles a row's checkbox. Ticking records the file's current digest, so
+   * editing it later drops the mark again.
+   */
+  private async setRead(node: FilesElement | undefined, read: boolean): Promise<void> {
+    const root = this.rootUri();
+    if (!node || node.isDirectory || !root || !this.scope) {
+      return;
+    }
+    const relative = storedPath(root, node.uri);
+    if (relative === undefined) {
+      return;
+    }
+    if (!read) {
+      await this.marks.unmark(this.scope, [relative]);
+      return;
+    }
+    const digest = await fileDigest(node.uri.fsPath);
+    if (digest === undefined) {
+      void vscode.window.showWarningMessage(
+        `Tab Manager can't read "${relative}", so it can't be marked as read — see Output → Tab Manager.`,
+      );
+      return;
+    }
+    await this.marks.mark(this.scope, relative, digest);
+  }
+
   private rootUri(): vscode.Uri | undefined {
     const uri = this.store.activeFolderUri;
     return uri ? vscode.Uri.parse(uri) : undefined;
@@ -393,8 +534,9 @@ export class SubWorktreeManager
   }
 
   private fileItem(node: FileEntry): vscode.TreeItem {
+    const read = node.isDirectory ? undefined : this.isRead(node.uri);
     const item = new vscode.TreeItem(
-      node.name,
+      read === true ? struckThrough(node.name) : node.name,
       node.isDirectory
         ? this.expandAll
           ? vscode.TreeItemCollapsibleState.Expanded
@@ -417,6 +559,14 @@ export class SubWorktreeManager
       // See setExpandAll — the generation forces the default state to re-apply.
       item.id = `${this.expandGeneration}:${node.uri.toString()}`;
     } else {
+      // A stable id: the label changes when the row is ticked, and without an
+      // id VS Code identifies rows by what they render.
+      item.id = node.uri.toString();
+      if (read !== undefined) {
+        item.checkboxState = read
+          ? vscode.TreeItemCheckboxState.Checked
+          : vscode.TreeItemCheckboxState.Unchecked;
+      }
       const change = this.changedFiles?.get(node.uri.fsPath);
       if (change) {
         // The marker query makes ChangedFileDecorationProvider badge the row.
@@ -457,10 +607,12 @@ export class SubWorktreeManager
 
   dispose(): void {
     this.subscription.dispose();
+    this.checkboxSubscription?.dispose();
     this.watcher?.dispose();
     this.repoSubscription?.dispose();
     clearTimeout(this.refreshTimer);
     clearTimeout(this.repoRefreshTimer);
+    clearTimeout(this.digestTimer);
     this.emitter.dispose();
   }
 }
