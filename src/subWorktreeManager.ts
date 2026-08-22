@@ -13,7 +13,7 @@ import {
 } from './gitExtension';
 import { log } from './log';
 import { resolveWorktreePr } from './pr';
-import { absolutePath, fileDigest, ReadMarkStore, ReadScope, storedPath } from './readMarks';
+import { absolutePath, DigestCache, ReadMarkStore, ReadScope, storedPath } from './readMarks';
 import { LayoutStore } from './store';
 import { currentBranch, repoRootOf } from './worktrees';
 
@@ -133,7 +133,10 @@ function buildChangedTree(root: vscode.Uri, files: Iterable<string>): Map<string
 export class SubWorktreeManager
   implements vscode.TreeDataProvider<FilesElement>, vscode.Disposable
 {
-  private readonly emitter = new vscode.EventEmitter<void>();
+  // Fired with an element to redraw just that row, or with undefined for the
+  // whole tree — a full refresh re-runs `git diff` and the line counts, which
+  // is far too much work for a checkbox.
+  private readonly emitter = new vscode.EventEmitter<FilesElement | undefined>();
   readonly onDidChangeTreeData = this.emitter.event;
   private readonly subscription: vscode.Disposable;
   private stateSignature = '';
@@ -163,11 +166,14 @@ export class SubWorktreeManager
     | { key: string; ref: string | undefined; fromPr: boolean; scope: ReadScope | undefined }
     | undefined;
   private detectedDefault: { root: string; branch: string | undefined } | undefined;
+  /** The worktree being listed, parsed once — every row asks for it. */
+  private root: vscode.Uri | undefined;
   /** The review the read marks on these rows belong to; see {@link ReadScope}. */
   private scope: ReadScope | undefined;
   /** Paths whose content changed and whose read mark still has to be checked. */
   private readonly pendingDigestChecks = new Set<string>();
   private digestTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly digests = new DigestCache();
 
   // Whether directory rows default to expanded (the view-title toggle). The
   // generation is baked into row ids so each toggle defeats VS Code's
@@ -175,21 +181,29 @@ export class SubWorktreeManager
   private expandAll = false;
   private expandGeneration = 0;
 
+  // The "N of M reviewed" line, and the filter that hides reviewed rows. The
+  // count is over the full changed set, so it reads the same whether or not the
+  // filter is hiding anything.
+  private reviewedCount = 0;
+  private unreviewedOnly = false;
+
   constructor(
     private readonly store: LayoutStore,
     private readonly marks: ReadMarkStore,
   ) {
     this.subscription = vscode.Disposable.from(
       store.onDidChange(() => this.onStoreChange()),
-      // Ticking a file (here or in another window) only changes how rows look.
-      marks.onDidChange(() => this.emitter.fire()),
+      // Ticks made in this window redraw their own row; only another window's
+      // are a surprise, and those are rare enough to redraw everything.
+      marks.onDidChangeElsewhere(() => this.emitter.fire(undefined)),
     );
     this.applyStoreState();
     void vscode.commands.executeCommand('setContext', 'tabManager.filesExpanded', false);
+    void vscode.commands.executeCommand('setContext', 'tabManager.filesUnreviewedOnly', false);
   }
 
   refresh(): void {
-    this.emitter.fire();
+    this.emitter.fire(undefined);
   }
 
   /** The view-title collapse-all/expand-all toggle. */
@@ -197,7 +211,23 @@ export class SubWorktreeManager
     this.expandAll = expanded;
     this.expandGeneration++;
     void vscode.commands.executeCommand('setContext', 'tabManager.filesExpanded', expanded);
-    this.emitter.fire();
+    this.emitter.fire(undefined);
+  }
+
+  /** The view-title filter: show only files not yet marked read. */
+  setUnreviewedOnly(on: boolean): void {
+    if (this.unreviewedOnly === on) {
+      return;
+    }
+    this.unreviewedOnly = on;
+    void vscode.commands.executeCommand('setContext', 'tabManager.filesUnreviewedOnly', on);
+    // Re-filter from the cached change set — no git, no hashing.
+    const root = this.root;
+    if (root) {
+      this.rebuildRows(root);
+    }
+    this.updateTitle();
+    this.emitter.fire(undefined);
   }
 
   /**
@@ -216,11 +246,24 @@ export class SubWorktreeManager
   }
 
   private updateTitle(): void {
-    if (this.view) {
-      this.view.title = this.changedFiles
-        ? `${FILES_VIEW_TITLE} (${this.changedFiles.size})`
-        : FILES_VIEW_TITLE;
+    if (!this.view) {
+      return;
     }
+    this.view.title = this.changedFiles
+      ? `${FILES_VIEW_TITLE} (${this.changedFiles.size})`
+      : FILES_VIEW_TITLE;
+    // The review-progress line sits under the title, in the view's dimmed
+    // description slot — the only second line the Tree API offers.
+    this.view.description = this.reviewDescription();
+  }
+
+  private reviewDescription(): string | undefined {
+    const total = this.changedFiles?.size ?? 0;
+    if (total === 0) {
+      return undefined;
+    }
+    const percent = Math.round((this.reviewedCount / total) * 100);
+    return `${this.reviewedCount} files reviewed out of ${total} changed (${percent}%)`;
   }
 
   private onStoreChange(): void {
@@ -229,7 +272,7 @@ export class SubWorktreeManager
       return;
     }
     this.applyStoreState();
-    this.emitter.fire();
+    this.emitter.fire(undefined);
   }
 
   private signature(): string {
@@ -239,6 +282,8 @@ export class SubWorktreeManager
   private applyStoreState(): void {
     this.stateSignature = this.signature();
     this.cachedCompareRef = undefined;
+    const uri = this.store.activeFolderUri;
+    this.root = uri ? vscode.Uri.parse(uri) : undefined;
     this.watch();
     const root = this.rootUri();
     if (root) {
@@ -264,7 +309,7 @@ export class SubWorktreeManager
     const fsWatcher = vscode.workspace.createFileSystemWatcher(pattern);
     const scheduleRefresh = () => {
       clearTimeout(this.refreshTimer);
-      this.refreshTimer = setTimeout(() => this.emitter.fire(), 300);
+      this.refreshTimer = setTimeout(() => this.emitter.fire(undefined), 300);
     };
     this.watcher = vscode.Disposable.from(
       fsWatcher,
@@ -293,7 +338,7 @@ export class SubWorktreeManager
         this.cachedCompareRef = undefined;
       }
       clearTimeout(this.repoRefreshTimer);
-      this.repoRefreshTimer = setTimeout(() => this.emitter.fire(), 1000);
+      this.repoRefreshTimer = setTimeout(() => this.emitter.fire(undefined), 1000);
     });
   }
 
@@ -351,32 +396,42 @@ export class SubWorktreeManager
    * costs nothing.
    */
   private scheduleDigestCheck(uri: vscode.Uri): void {
-    const root = this.rootUri();
-    const relative = root && storedPath(root, uri);
-    if (
-      !this.scope ||
-      relative === undefined ||
-      this.marks.digestOf(this.scope, relative) === undefined
-    ) {
+    // Every write anywhere in the worktree lands here — builds, installs, a
+    // formatter running over the tree — so this bails out as early as it can.
+    const root = this.root;
+    if (!this.scope || !root) {
+      return;
+    }
+    const relative = storedPath(root, uri);
+    if (relative === undefined || this.marks.digestOf(this.scope, relative) === undefined) {
       return;
     }
     this.pendingDigestChecks.add(relative);
     clearTimeout(this.digestTimer);
-    this.digestTimer = setTimeout(() => void this.dropStaleMarks(this.pendingDigestChecks), 300);
+    this.digestTimer = setTimeout(() => {
+      void this.dropStaleMarks(this.pendingDigestChecks, true).then((dropped) => {
+        if (dropped) {
+          this.emitter.fire(undefined);
+        }
+      });
+    }, 300);
   }
 
   /**
    * Un-marks files whose content no longer matches what was read. `candidates`
    * is drained as it is taken, so a check in flight can't swallow paths queued
-   * behind it.
+   * behind it. `edited` says the files are known to have just been written, so
+   * they must be hashed rather than trusted to their stat.
+   *
+   * Returns whether any mark was dropped.
    */
-  private async dropStaleMarks(candidates: Set<string>): Promise<void> {
+  private async dropStaleMarks(candidates: Set<string>, edited: boolean): Promise<boolean> {
     const scope = this.scope;
     const root = this.rootUri();
     const paths = [...candidates];
     candidates.clear();
     if (!scope || !root || paths.length === 0) {
-      return;
+      return false;
     }
     const stale = await Promise.all(
       paths.map(async (relative) => {
@@ -384,15 +439,19 @@ export class SubWorktreeManager
         if (marked === undefined) {
           return undefined; // un-marked while we were queued
         }
-        const digest = await fileDigest(absolutePath(root, relative));
+        const fsPath = absolutePath(root, relative);
+        const digest = edited
+          ? await this.digests.rehash(fsPath)
+          : await this.digests.digest(fsPath);
         return digest === marked ? undefined : relative;
       }),
     );
     const dropped = stale.filter((relative): relative is string => relative !== undefined);
-    if (dropped.length > 0) {
-      log(`read marks: ${dropped.length} file(s) changed since they were read — un-marking`);
-      await this.marks.unmark(scope, dropped);
+    if (dropped.length === 0) {
+      return false;
     }
+    log(`read marks: ${dropped.length} file(s) changed since they were read — un-marking`);
+    return this.marks.unmark(scope, dropped);
   }
 
   /** Refreshes the changed-file set (and the folders containing them). */
@@ -415,16 +474,59 @@ export class SubWorktreeManager
     }
 
     this.changedFiles = comparison.files;
-    this.changedChildren = buildChangedTree(root, comparison.files.keys());
     this.compareBase = comparison.base;
     this.compareLabel = branch;
     this.changedStats = await changedLineCounts(root, comparison.base, comparison.files);
-    this.changedDirStats = totalsByDirectory(root, this.changedStats);
     // Catch up on edits made while this window wasn't watching (another window,
-    // an agent, a rebase) before the rows render their ticks.
+    // an agent, a rebase) before the counts and the filter read the marks.
+    // Cheap: only a file whose stat moved since it was last hashed is read.
     if (this.scope) {
-      await this.dropStaleMarks(new Set(this.marks.markedPaths(this.scope)));
+      await this.dropStaleMarks(new Set(this.marks.markedPaths(this.scope)), false);
     }
+    this.rebuildRows(root);
+  }
+
+  /**
+   * Rebuilds the visible rows and the review count from the cached change set —
+   * no git, no hashing — so a tick or a filter toggle is cheap. The count is
+   * always over every changed file; the filter only decides which rows show.
+   */
+  private rebuildRows(root: vscode.Uri): void {
+    const files = this.changedFiles;
+    if (!files) {
+      this.reviewedCount = 0;
+      this.changedChildren = undefined;
+      this.changedDirStats = undefined;
+      return;
+    }
+    let reviewed = 0;
+    const visible = new Set<string>();
+    for (const fsPath of files.keys()) {
+      const read = this.isReadFsPath(root, fsPath);
+      if (read) {
+        reviewed++;
+      }
+      if (!this.unreviewedOnly || !read) {
+        visible.add(fsPath);
+      }
+    }
+    this.reviewedCount = reviewed;
+    this.changedChildren = buildChangedTree(root, visible);
+    const stats = this.changedStats;
+    const visibleStats =
+      this.unreviewedOnly && stats
+        ? new Map([...stats].filter(([fsPath]) => visible.has(fsPath)))
+        : stats;
+    this.changedDirStats = visibleStats ? totalsByDirectory(root, visibleStats) : undefined;
+  }
+
+  /** Whether a changed file (keyed by fsPath, as the change set is) is read. */
+  private isReadFsPath(root: vscode.Uri, fsPath: string): boolean {
+    if (!this.scope) {
+      return false;
+    }
+    const relative = storedPath(root, vscode.Uri.file(fsPath));
+    return relative !== undefined && this.marks.digestOf(this.scope, relative) !== undefined;
   }
 
   /**
@@ -511,22 +613,38 @@ export class SubWorktreeManager
       return;
     }
     if (!read) {
-      await this.marks.unmark(this.scope, [relative]);
+      if (await this.marks.unmark(this.scope, [relative])) {
+        this.onReadToggled(node);
+      }
       return;
     }
-    const digest = await fileDigest(node.uri.fsPath);
+    const digest = await this.digests.rehash(node.uri.fsPath);
     if (digest === undefined) {
       void vscode.window.showWarningMessage(
         `Tab Manager can't read "${relative}", so it can't be marked as read — see Output → Tab Manager.`,
       );
+      this.emitter.fire(node); // put the checkbox back the way it was
       return;
     }
-    await this.marks.mark(this.scope, relative, digest);
+    if (await this.marks.mark(this.scope, relative, digest)) {
+      this.onReadToggled(node);
+    }
+  }
+
+  /** After a tick lands: refresh the review line, and redraw what changed. */
+  private onReadToggled(node: FilesElement): void {
+    const root = this.root;
+    if (root) {
+      this.rebuildRows(root);
+    }
+    this.updateTitle();
+    // Under the filter the ticked row appears or disappears, so the tree's
+    // shape changed — redraw it. Otherwise only that row's own look changed.
+    this.emitter.fire(this.unreviewedOnly ? undefined : node);
   }
 
   private rootUri(): vscode.Uri | undefined {
-    const uri = this.store.activeFolderUri;
-    return uri ? vscode.Uri.parse(uri) : undefined;
+    return this.root;
   }
 
   getTreeItem(element: FilesElement): vscode.TreeItem {

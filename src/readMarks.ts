@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
-import { createReadStream, mkdirSync } from 'fs';
+import { createReadStream, mkdirSync, Stats } from 'fs';
+import { stat } from 'fs/promises';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { errorMessage } from './cli';
@@ -55,6 +56,55 @@ export function fileDigest(fsPath: string): Promise<string | undefined> {
   });
 }
 
+/**
+ * File digests, with a stat-based shortcut: a file whose size and modification
+ * time are unchanged since it was last hashed keeps its digest, so re-checking
+ * a review's marked files costs one stat each instead of a full read.
+ *
+ * A stat can lie — two writes within the same millisecond that leave the size
+ * alone look identical — so {@link rehash} exists for the cases where a file is
+ * known to have just changed, and hashes unconditionally.
+ */
+export class DigestCache {
+  private readonly stamps = new Map<string, { mtimeMs: number; size: number; digest: string }>();
+
+  /** The file's digest, re-reading it only if its stat moved. */
+  async digest(fsPath: string): Promise<string | undefined> {
+    let info: Stats;
+    try {
+      info = await stat(fsPath);
+    } catch (error) {
+      this.stamps.delete(fsPath);
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return DELETED_DIGEST;
+      }
+      log(`read marks: cannot stat ${fsPath}: ${errorMessage(error)}`);
+      return undefined;
+    }
+    const stamp = this.stamps.get(fsPath);
+    if (stamp?.mtimeMs === info.mtimeMs && stamp.size === info.size) {
+      return stamp.digest;
+    }
+    return this.rehash(fsPath, info);
+  }
+
+  /** The file's digest, read afresh whatever the stat says. */
+  async rehash(fsPath: string, info?: Stats): Promise<string | undefined> {
+    const digest = await fileDigest(fsPath);
+    if (digest === undefined || digest === DELETED_DIGEST) {
+      this.stamps.delete(fsPath);
+      return digest;
+    }
+    // Stat after hashing, not before: a file written while we read it then has
+    // a stamp that won't match, and the next check hashes it again.
+    const stamped = info ?? (await stat(fsPath).catch(() => undefined));
+    if (stamped) {
+      this.stamps.set(fsPath, { mtimeMs: stamped.mtimeMs, size: stamped.size, digest });
+    }
+    return digest;
+  }
+}
+
 /** Marks as they sit on disk: repo → review → file path → digest. */
 interface StoredMarks {
   version: number;
@@ -74,13 +124,18 @@ interface StoredMarks {
  */
 export class ReadMarkStore implements vscode.Disposable {
   private readonly emitter = new vscode.EventEmitter<void>();
-  /** Fires whenever the marks change — here or in another window. */
-  readonly onDidChange = this.emitter.event;
+  /**
+   * Fires when another window changed the marks. Changes made here don't fire:
+   * the caller already knows, and knows which rows to redraw.
+   */
+  readonly onDidChangeElsewhere = this.emitter.event;
 
   private readonly file: vscode.Uri;
   private readonly tempFile: vscode.Uri;
   private readonly watcher: vscode.FileSystemWatcher;
   private marks: StoredMarks = { version: VERSION, repos: {} };
+  /** The file's text as we last saw it, to recognize our own writes. */
+  private serialized = '';
   /** Serializes read-modify-write cycles against each other. */
   private pendingWrite: Promise<void> = Promise.resolve();
 
@@ -106,7 +161,7 @@ export class ReadMarkStore implements vscode.Disposable {
 
   /** Loads the marks into memory. Call once, before the views first render. */
   async load(): Promise<void> {
-    this.marks = await this.read();
+    await this.adopt();
   }
 
   /** The digest recorded for a file, or undefined if it isn't marked read. */
@@ -119,9 +174,9 @@ export class ReadMarkStore implements vscode.Disposable {
     return Object.keys(this.marks.repos[scope.repoRoot]?.[scope.id] ?? {});
   }
 
-  /** Marks one file read at the given digest. */
-  async mark(scope: ReadScope, relativePath: string, digest: string): Promise<void> {
-    await this.mutate((marks) => {
+  /** Marks one file read at the given digest. Returns whether anything changed. */
+  async mark(scope: ReadScope, relativePath: string, digest: string): Promise<boolean> {
+    return this.mutate((marks) => {
       const review = ((marks.repos[scope.repoRoot] ??= {})[scope.id] ??= {});
       if (review[relativePath] === digest) {
         return false;
@@ -132,8 +187,8 @@ export class ReadMarkStore implements vscode.Disposable {
   }
 
   /** Un-marks files — ticked off by the user, or gone stale. */
-  async unmark(scope: ReadScope, relativePaths: readonly string[]): Promise<void> {
-    await this.mutate((marks) => {
+  async unmark(scope: ReadScope, relativePaths: readonly string[]): Promise<boolean> {
+    return this.mutate((marks) => {
       const repo = marks.repos[scope.repoRoot];
       const review = repo?.[scope.id];
       if (!repo || !review) {
@@ -162,56 +217,79 @@ export class ReadMarkStore implements vscode.Disposable {
   }
 
   /**
-   * Applies `change` to the marks as they are on disk right now, and writes
-   * them back if it reported a change.
+   * Applies `change` to the marks as they are on disk right now, writes them
+   * back if it reported a change, and says whether it did. Queued behind any
+   * cycle already in flight, so concurrent ticks can't lose each other.
    */
-  private mutate(change: (marks: StoredMarks) => boolean): Promise<void> {
-    this.pendingWrite = this.pendingWrite.then(async () => {
-      const marks = await this.read();
-      if (!change(marks)) {
-        this.marks = marks;
-        return;
-      }
+  private mutate(change: (marks: StoredMarks) => boolean): Promise<boolean> {
+    const done = this.pendingWrite.then(async () => {
+      const { marks, text } = await this.read();
       this.marks = marks;
+      this.serialized = text;
+      if (!change(marks)) {
+        return false;
+      }
       await this.write(marks);
-      this.emitter.fire();
+      return true;
     });
-    return this.pendingWrite;
+    // The queue only sequences the cycles; a failing one mustn't wedge it.
+    this.pendingWrite = done.then(
+      () => undefined,
+      () => undefined,
+    );
+    return done;
+  }
+
+  /** Takes on what's in the file. Returns whether that differs from what we had. */
+  private async adopt(): Promise<boolean> {
+    const { marks, text } = await this.read();
+    if (text === this.serialized) {
+      return false;
+    }
+    this.marks = marks;
+    this.serialized = text;
+    return true;
   }
 
   private async reload(): Promise<void> {
-    this.marks = await this.read();
-    this.emitter.fire();
+    // Our own writes come back through the watcher too; only a change we
+    // didn't make is worth telling anyone about.
+    if (await this.adopt()) {
+      this.emitter.fire();
+    }
   }
 
-  private async read(): Promise<StoredMarks> {
-    let raw: Uint8Array;
+  private async read(): Promise<{ marks: StoredMarks; text: string }> {
+    const empty = { marks: { version: VERSION, repos: {} }, text: '' };
+    let text: string;
     try {
-      raw = await vscode.workspace.fs.readFile(this.file);
+      text = new TextDecoder().decode(await vscode.workspace.fs.readFile(this.file));
     } catch {
-      return { version: VERSION, repos: {} }; // no marks stored yet
+      return empty; // no marks stored yet
     }
     try {
-      const parsed = JSON.parse(new TextDecoder().decode(raw)) as StoredMarks;
+      const marks = JSON.parse(text) as StoredMarks;
       // Written by us, but a hand-edit or a half-written file shouldn't take
       // the view down — start over rather than trusting a bad shape.
-      if (parsed?.version !== VERSION || typeof parsed.repos !== 'object') {
-        throw new Error(`unexpected shape (version ${String(parsed?.version)})`);
+      if (marks?.version !== VERSION || typeof marks.repos !== 'object') {
+        throw new Error(`unexpected shape (version ${String(marks?.version)})`);
       }
-      return parsed;
+      return { marks, text };
     } catch (error) {
       log(`read marks: ignoring unreadable ${this.file.fsPath}: ${errorMessage(error)}`);
-      return { version: VERSION, repos: {} };
+      return empty;
     }
   }
 
   /** Writes via a temp file and a rename, so a crash can't truncate the marks. */
   private async write(marks: StoredMarks): Promise<void> {
-    const encoded = new TextEncoder().encode(JSON.stringify(marks, undefined, 2));
+    const text = JSON.stringify(marks, undefined, 2);
+    const encoded = new TextEncoder().encode(text);
     try {
       await vscode.workspace.fs.createDirectory(this.storageUri);
       await vscode.workspace.fs.writeFile(this.tempFile, encoded);
       await vscode.workspace.fs.rename(this.tempFile, this.file, { overwrite: true });
+      this.serialized = text;
     } catch (error) {
       log(`read marks: cannot save ${this.file.fsPath}: ${errorMessage(error)}`);
       void vscode.window.showWarningMessage(

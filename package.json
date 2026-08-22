@@ -2,7 +2,7 @@
   "name": "tab-manager",
   "displayName": "Tab Manager",
   "description": "Worktree-centric window management: one window per worktree, with PR linking, creation from PRs, and changed-file diffs.",
-  "version": "0.2.59",
+  "version": "0.2.61",
   "publisher": "chaidhat",
   "license": "MIT",
   "repository": {
@@ -231,6 +231,18 @@
         "title": "Collapse All Files",
         "category": "Tab Manager",
         "icon": "$(collapse-all)"
+      },
+      {
+        "command": "tabManager.filesShowUnreviewedOnly",
+        "title": "Show Only Unreviewed Files",
+        "category": "Tab Manager",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "tabManager.filesShowAll",
+        "title": "Show All Files",
+        "category": "Tab Manager",
+        "icon": "$(filter-filled)"
       }
     ],
     "menus": {
@@ -251,14 +263,24 @@
           "group": "navigation"
         },
         {
+          "command": "tabManager.filesShowUnreviewedOnly",
+          "when": "view == tab-manager.subWorktreeFiles && !tabManager.filesUnreviewedOnly",
+          "group": "navigation@0"
+        },
+        {
+          "command": "tabManager.filesShowAll",
+          "when": "view == tab-manager.subWorktreeFiles && tabManager.filesUnreviewedOnly",
+          "group": "navigation@0"
+        },
+        {
           "command": "tabManager.filesExpandAll",
           "when": "view == tab-manager.subWorktreeFiles && !tabManager.filesExpanded",
-          "group": "navigation"
+          "group": "navigation@1"
         },
         {
           "command": "tabManager.filesCollapseAll",
           "when": "view == tab-manager.subWorktreeFiles && tabManager.filesExpanded",
-          "group": "navigation"
+          "group": "navigation@1"
         }
       ],
       "commandPalette": [
@@ -344,6 +366,14 @@
         },
         {
           "command": "tabManager.filesCollapseAll",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.filesShowUnreviewedOnly",
+          "when": "false"
+        },
+        {
+          "command": "tabManager.filesShowAll",
           "when": "false"
         },
         {

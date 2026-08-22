@@ -81,6 +81,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('tabManager.filesCollapseAll', () =>
       subManager.setExpandAll(false),
     ),
+    // Show only files not yet marked read, and back again — one of the two
+    // shows at a time, gated on the tabManager.filesUnreviewedOnly context key.
+    vscode.commands.registerCommand('tabManager.filesShowUnreviewedOnly', () =>
+      subManager.setUnreviewedOnly(true),
+    ),
+    vscode.commands.registerCommand('tabManager.filesShowAll', () =>
+      subManager.setUnreviewedOnly(false),
+    ),
     // The Root Worktree Manager view's title refresh — drops the PR/branch
     // caches so rows re-query gh and pick up merged/renamed PRs.
     vscode.commands.registerCommand('tabManager.refreshWorktrees', () => rootManager.refresh()),
