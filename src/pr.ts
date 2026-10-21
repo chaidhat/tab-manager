@@ -581,17 +581,36 @@ function renderMarkdown(markdown: string): string {
 }
 
 /**
+ * Outcome of looking up a worktree's PR. "no-pr" is a definitive answer (the
+ * branch has no PR, or `gh` isn't installed at all); "failed" means the answer
+ * is unknown (auth, network, rate limit…) — a PR may well exist, so callers
+ * basing behavior on it should say so rather than quietly assume "no PR".
+ */
+export type WorktreePrLookup = { kind: 'pr'; pr: PrDetail } | { kind: 'no-pr' } | { kind: 'failed' };
+
+/** The PR for the worktree's current branch, distinguishing "no PR" from a failed lookup. */
+export async function lookUpWorktreePr(cwd: string): Promise<WorktreePrLookup> {
+  try {
+    return { kind: 'pr', pr: await fetchPr(cwd) };
+  } catch (error) {
+    log(`tree: pr lookup failed for ${cwd}: ${errorMessage(error)}`);
+    // `gh pr view` puts this phrase on stderr when the branch simply has no
+    // PR; a missing gh binary likewise means there is no PR to be had.
+    const noPr =
+      /no pull requests found/i.test(errorMessage(error)) ||
+      (error as NodeJS.ErrnoException).code === 'ENOENT';
+    return noPr ? { kind: 'no-pr' } : { kind: 'failed' };
+  }
+}
+
+/**
  * The pull request for a worktree, for the Worktrees list. Returns undefined
  * when there's no PR (or `gh` fails); failures are logged, not surfaced,
  * since this runs speculatively for every worktree row.
  */
 export async function resolveWorktreePr(cwd: string): Promise<PrDetail | undefined> {
-  try {
-    return await fetchPr(cwd);
-  } catch (error) {
-    log(`tree: pr lookup failed for ${cwd}: ${errorMessage(error)}`);
-    return undefined;
-  }
+  const lookup = await lookUpWorktreePr(cwd);
+  return lookup.kind === 'pr' ? lookup.pr : undefined;
 }
 
 /**

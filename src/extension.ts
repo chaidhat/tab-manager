@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { registerCommands } from './commands';
 import { registerFileCommands } from './fileCommands';
+import { OpenWindowRegistry } from './openWindows';
 import { registerPrView } from './pr';
 import { ReadMarkStore } from './readMarks';
 import { rememberOpenRepos } from './repos';
@@ -19,7 +20,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await marks.load();
   const rootManager = new RootWorktreeManager(store);
   const subManager = new SubWorktreeManager(store, marks);
-  const sessionMonitor = new SessionMonitor();
+  const openWindows = new OpenWindowRegistry();
+  await openWindows.start();
+  const sessionMonitor = new SessionMonitor(openWindows);
 
   // A window opened at a `.claude/worktrees/<name>` folder additionally gets
   // the dedicated Sub Worktree Manager container, whose views target that
@@ -49,15 +52,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(filesView);
   }
 
-  // Like the Files view, createTreeView rather than registerTreeDataProvider:
-  // the monitor needs the view handle to put the waiting-session count on the
-  // activity-bar icon.
-  const sessionsView = vscode.window.createTreeView('tab-manager.claudeSessions', {
-    treeDataProvider: sessionMonitor,
-  });
-  sessionMonitor.attachView(sessionsView);
-  context.subscriptions.push(sessionsView);
-
   // The Root Worktree Manager's repository list is global (VS Code settings),
   // so every window lists the same repositories — and a window opening on a
   // worktree is what puts that worktree's repository on the list.
@@ -68,6 +62,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     marks,
     rootManager,
     subManager,
+    openWindows,
     sessionMonitor,
     vscode.workspace.onDidChangeWorkspaceFolders(() => void rememberOpenRepos()),
     vscode.window.registerFileDecorationProvider(new ChangedFileDecorationProvider()),

@@ -34,9 +34,15 @@ const STATE_ORDER: Record<SessionState, number> = { asking: 0, working: 1, done:
 
 /** One running Claude Code session. */
 export interface Session {
+  readonly agent: 'Claude' | 'Codex';
+  /** Present only when the Codex completion hook and saved turn agree. */
+  readonly completionId?: string;
+  /** A Codex subagent's direct parent; absent for top-level sessions. */
+  readonly parentSessionId: string | undefined;
   /** Stable across the session's life — what notifications are keyed on. */
   readonly sessionId: string;
-  readonly pid: number;
+  /** Claude publishes its process id; Codex identifies liveness with a lock. */
+  readonly pid: number | undefined;
   /** The folder the session is running in. */
   readonly cwd: string;
   /** The session's own name, e.g. `tab-manager-ba`. */
@@ -44,6 +50,8 @@ export interface Session {
   readonly state: SessionState;
   /** What an asking session is blocked on, when it says. */
   readonly waitingFor: string | undefined;
+  /** A more specific state label, such as a stopped subagent. */
+  readonly activity: string | undefined;
   /** When it entered {@link state} — what the row's age counts from. */
   readonly stateSince: number;
 }
@@ -105,7 +113,7 @@ async function readSession(fileName: string): Promise<Session | undefined> {
     return undefined;
   }
   // A dead process is the ordinary end of a session, not a fault: no log.
-  return isAlive(session.pid) ? session : undefined;
+  return session.pid !== undefined && isAlive(session.pid) ? session : undefined;
 }
 
 /** The parsed file as a {@link Session}, or undefined if a field is missing. */
@@ -129,6 +137,8 @@ function toSession(raw: unknown): Session | undefined {
     return undefined;
   }
   return {
+    agent: 'Claude',
+    parentSessionId: undefined,
     sessionId,
     pid,
     cwd,
@@ -140,6 +150,7 @@ function toSession(raw: unknown): Session | undefined {
       typeof fields.waitingFor === 'string' && fields.waitingFor !== ''
         ? fields.waitingFor
         : undefined,
+    activity: undefined,
     // Missing only for a session that has not changed state since it started,
     // in which case its age is its whole life — which is what we want to show.
     stateSince:

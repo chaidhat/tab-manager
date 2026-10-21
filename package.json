@@ -2,7 +2,7 @@
   "name": "tab-manager",
   "displayName": "Tab Manager",
   "description": "Worktree-centric window management: one window per worktree, with PR linking, creation from PRs, and changed-file diffs.",
-  "version": "0.2.61",
+  "version": "0.2.62",
   "publisher": "chaidhat",
   "license": "MIT",
   "repository": {
@@ -30,7 +30,7 @@
           },
           "default": [],
           "scope": "machine",
-          "markdownDescription": "Absolute paths of the repositories listed in the Root Worktree Manager view. The list is shared by every window, and opening a window on a repository (or one of its worktrees) adds it. Add and remove them from the view itself — `Add Repository…` in its title bar, and the `×` on a repository row. A leading `~` is expanded to your home directory."
+          "markdownDescription": "Absolute paths of the repositories listed in the Root Worktree Manager view. The list is shared by every window, and opening a window on a repository (or one of its worktrees) adds it. Add and remove them from the view itself \u2014 `Add Repository\u2026` in its title bar, and the `\u00d7` on a repository row. A leading `~` is expanded to your home directory."
         }
       }
     },
@@ -45,11 +45,6 @@
           "id": "tab-manager-sub-worktree",
           "title": "Sub Worktree Manager",
           "icon": "media/layers.svg"
-        },
-        {
-          "id": "tab-manager-sessions",
-          "title": "Claude Sessions",
-          "icon": "media/claude.svg"
         }
       ]
     },
@@ -74,27 +69,16 @@
           "name": "Files Changed",
           "when": "tabManager.isSubWorktree"
         }
-      ],
-      "tab-manager-sessions": [
-        {
-          "type": "tree",
-          "id": "tab-manager.claudeSessions",
-          "name": "Claude Sessions"
-        }
       ]
     },
     "viewsWelcome": [
       {
         "view": "tab-manager.rootWorktrees",
-        "contents": "Add a repository to manage its worktrees — create them (from scratch or from a PR), and click one to open it in its own window.\n[Add Repository…](command:tabManager.addRepository)"
+        "contents": "Add a repository to manage its worktrees \u2014 create them (from scratch or from a PR), and click one to open it in its own window.\n[Add Repository\u2026](command:tabManager.addRepository)"
       },
       {
         "view": "tab-manager.subWorktreeFiles",
         "contents": "No files changed compared to the base branch."
-      },
-      {
-        "view": "tab-manager.claudeSessions",
-        "contents": "No Claude Code sessions are running in your repositories.\nSessions appear here on their own, with what each one is doing — and you get a notification when one finishes or asks you something."
       }
     ],
     "commands": [
@@ -177,7 +161,7 @@
       },
       {
         "command": "tabManager.newWorktreeBlank",
-        "title": "New Worktree…",
+        "title": "New Worktree\u2026",
         "category": "Tab Manager",
         "icon": "$(add)"
       },
@@ -199,7 +183,7 @@
       },
       {
         "command": "tabManager.addRepository",
-        "title": "Add Repository…",
+        "title": "Add Repository\u2026",
         "category": "Tab Manager",
         "icon": "$(new-folder)"
       },

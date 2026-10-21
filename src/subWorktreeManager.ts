@@ -12,7 +12,7 @@ import {
   onRepositoryStateChanged,
 } from './gitExtension';
 import { log } from './log';
-import { resolveWorktreePr } from './pr';
+import { lookUpWorktreePr } from './pr';
 import { absolutePath, DigestCache, ReadMarkStore, ReadScope, storedPath } from './readMarks';
 import { LayoutStore } from './store';
 import { currentBranch, repoRootOf } from './worktrees';
@@ -158,6 +158,7 @@ export class SubWorktreeManager
   /** Display name of the ref being compared against, for diff-tab titles. */
   private compareLabel: string | undefined;
   private warnedFilterKey: string | undefined;
+  private warnedPrLookupKey: string | undefined;
   // Both caches avoid re-spawning `gh`/`git` on every re-render; keyed so a
   // different root (or branch) recomputes. `fromPr` records whether the ref
   // is the PR's target branch or the default-branch fallback — only the
@@ -203,6 +204,10 @@ export class SubWorktreeManager
   }
 
   refresh(): void {
+    // An explicit refresh re-resolves the compare base too: a failed PR
+    // lookup (or a PR retargeted to another base) would otherwise stay
+    // cached until the branch changes.
+    this.cachedCompareRef = undefined;
     this.emitter.fire(undefined);
   }
 
@@ -541,7 +546,8 @@ export class SubWorktreeManager
     const branch = await currentBranch(root.fsPath);
     const key = `${root.toString()}|${branch ?? ''}`;
     if (this.cachedCompareRef?.key !== key) {
-      const pr = await resolveWorktreePr(root.fsPath);
+      const lookup = await lookUpWorktreePr(root.fsPath);
+      const pr = lookup.kind === 'pr' ? lookup.pr : undefined;
       // Read marks hang off the same lookup: the repository the worktree
       // belongs to, plus the PR being reviewed (the branch, when there is no
       // PR — a worktree with neither has nowhere to file them).
@@ -551,9 +557,26 @@ export class SubWorktreeManager
       this.cachedCompareRef = pr
         ? { key, ref: `origin/${pr.baseRefName}`, fromPr: true, scope }
         : { key, ref: await this.defaultBranch(root), fromPr: false, scope };
+      // A failed lookup (auth, network…) is not "no PR": the default-branch
+      // fallback may diff against the wrong base, so say which ref is in use
+      // rather than presenting it as the PR comparison.
+      if (lookup.kind === 'failed' && this.cachedCompareRef.ref) {
+        this.warnPrLookupFailed(key, this.cachedCompareRef.ref);
+      }
     }
     this.scope = this.cachedCompareRef.scope;
     return this.cachedCompareRef.ref;
+  }
+
+  private warnPrLookupFailed(key: string, ref: string): void {
+    log(`files filter: pr lookup failed — comparing against "${ref}" instead`);
+    if (this.warnedPrLookupKey !== key) {
+      this.warnedPrLookupKey = key;
+      vscode.window.showWarningMessage(
+        `Tab Manager couldn't look up this worktree's pull request — comparing files against ` +
+          `"${ref}" instead. Press the refresh button to retry.`,
+      );
+    }
   }
 
   private warnFilterUnavailable(root: vscode.Uri, branch: string): void {
